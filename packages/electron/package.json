@@ -1,0 +1,30 @@
+{
+  "name": "@webdesktopmcp/electron",
+  "version": "0.1.0",
+  "description": "WebMCP for Electron: expose your app's webview functionality to AI agents via document.modelContext",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node build.mjs && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@webdesktopmcp/core": "workspace:*",
+    "@webdesktopmcp/protocol": "workspace:*",
+    "@webdesktopmcp/server": "workspace:*"
+  },
+  "peerDependencies": {
+    "electron": ">=25"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "electron": "^38.2.0",
+    "esbuild": "^0.25.10",
+    "typescript": "^5.9.2"
+  }
+}

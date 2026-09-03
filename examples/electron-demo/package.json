@@ -1,0 +1,16 @@
+{
+  "name": "webdesktopmcp-electron-demo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Demo Electron app exposing its UI as WebMCP tools to AI agents",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^38.2.0"
+  },
+  "dependencies": {
+    "@webdesktopmcp/electron": "workspace:*"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "@webdesktopmcp/core",
+  "version": "0.1.0",
+  "description": "W3C WebMCP polyfill for desktop webviews: implements document.modelContext on top of the webdesktopmcp host bridge",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@webdesktopmcp/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4",
+    "happy-dom": "^18.0.1"
+  }
+}

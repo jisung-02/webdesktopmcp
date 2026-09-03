@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  
+  <title>WebDesktopMCP Demo</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body { font: 14px/1.6 -apple-system, "Segoe UI", sans-serif; margin: 0; padding: 24px; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    .sub { opacity: .7; margin-bottom: 20px; }
+    .mode { display: inline-block; padding: 1px 8px; border-radius: 999px; background: #2563eb; color: #fff; font-size: 12px; }
+    section { margin-bottom: 24px; }
+    h2 { font-size: 14px; margin: 0 0 8px; text-transform: uppercase; letter-spacing: .06em; opacity: .6; }
+    ul { margin: 0; padding: 0; list-style: none; }
+    li { padding: 8px 12px; border: 1px solid color-mix(in srgb, currentColor 15%, transparent); border-radius: 8px; margin-bottom: 6px; }
+    code { background: color-mix(in srgb, currentColor 10%, transparent); padding: 1px 5px; border-radius: 4px; }
+    form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    input, button { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid color-mix(in srgb, currentColor 25%, transparent); }
+    button { cursor: pointer; }
+    #tasks li { display: flex; justify-content: space-between; }
+    .hint { opacity: .55; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>WebDesktopMCP 데모 <span id="mode" class="mode">…</span></h1>
+  <p class="sub">이 앱의 기능이 <code>document.modelContext</code> 도구로 노출됩니다. 에이전트에게 연결:
+    <code>npx @webdesktopmcp/cli connect --app "WebDesktopMCP Demo"</code></p>
+
+  <section>
+    <h2>등록된 도구 (toolchange)</h2>
+    <ul id="tools"><li class="hint">불러오는 중…</li></ul>
+  </section>
+
+  <section>
+    <h2>할 일 (에이전트가 create-task / complete-task로 조작 가능)</h2>
+    <ul id="tasks"></ul>
+  </section>
+
+  <section>
+    <h2>선언형 도구: 커피 주문 (&lt;form toolname="order-coffee"&gt;)</h2>
+    <form id="coffee" toolname="order-coffee" tooldescription="커피를 주문한다. 음료 종류와 샷 수를 받아 주문 번호를 반환한다." toolautosubmit>
+      <select name="drink" toolparamdescription="음료 종류">
+        <option value="americano">americano</option>
+        <option value="latte">latte</option>
+        <option value="coldbrew">coldbrew</option>
+      </select>
+      <input type="number" name="shots" toolparamdescription="샷 수 (1~3)" value="1" min="1" max="3" />
+      <button type="submit">주문</button>
+      <span id="order-result" class="hint"></span>
+    </form>
+  </section>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

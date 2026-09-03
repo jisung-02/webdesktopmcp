@@ -1,0 +1,24 @@
+{
+  "name": "@webdesktopmcp/cli",
+  "version": "0.1.0",
+  "description": "stdio shim that connects MCP clients (Claude Desktop, etc.) to a running webdesktopmcp desktop app",
+  "license": "MIT",
+  "bin": {
+    "webdesktopmcp": "./dist/cli.js"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.18.0",
+    "@webdesktopmcp/protocol": "workspace:*",
+    "@webdesktopmcp/server": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "esbuild": "^0.25.10",
+    "typescript": "^5.9.2"
+  }
+}

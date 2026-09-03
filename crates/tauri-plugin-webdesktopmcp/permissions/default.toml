@@ -1,0 +1,7 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = """Default permissions for the webdesktopmcp plugin. Allows webview
+pages to talk to the host bridge (`plugin:webdesktopmcp|send`); the bridge itself
+enforces per-origin exposure rules from the wire protocol."""
+permissions = ["allow-send"]
