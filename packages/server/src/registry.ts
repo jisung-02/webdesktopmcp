@@ -240,17 +240,17 @@ export class ToolRegistry {
   }
 
   #add(frameId: string, tool: ToolDeclaration, exposedTo?: string[]): RegisterOutcome {
-    if (this.#tools.has(tool.name)) {
-      const owner = this.#tools.get(tool.name)!.frameId;
-      if (owner === frameId) {
-        // Same frame re-registering: spec says reject (unique per document).
-        return { ok: false, errorMessage: `Tool "${tool.name}" is already registered in this frame.` };
-      }
+    const existing = this.#tools.get(tool.name);
+    if (existing && existing.frameId !== frameId) {
       return {
         ok: false,
-        errorMessage: `Tool name "${tool.name}" is already used by another webview (frame "${owner}"). Tool names must be unique within the app.`,
+        errorMessage: `Tool name "${tool.name}" is already used by another webview (frame "${existing.frameId}"). Tool names must be unique within the app.`,
       };
     }
+    // Same-frame re-register REPLACES the entry: the page reloads / navigates
+    // and re-registers the same names (the W3C uniqueness rule is per
+    // document and the polyfill enforces it locally; the host must not strand
+    // a frame whose document changed underneath it).
     this.#tools.set(tool.name, {
       ...tool,
       ...(exposedTo && exposedTo.length > 0 ? { exposedTo } : {}),

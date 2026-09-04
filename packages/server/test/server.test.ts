@@ -98,6 +98,15 @@ describe("ToolRegistry", () => {
     expect(r2.errorMessage).toMatch(/already used by another webview/);
   });
 
+  it("same-frame re-register replaces the entry (reload/dev-loop semantics)", () => {
+    registry.handleRegister("frame-1", "reg-1", TEST_TOOL);
+    const updated = { ...TEST_TOOL, description: "Updated description" };
+    const r2 = registry.handleRegister("frame-1", "reg-2", updated);
+    expect(r2.ok).toBe(true);
+    expect(registry.list()).toHaveLength(1);
+    expect(registry.get("search-cars")?.description).toBe("Updated description");
+  });
+
   it("drops a frame's tools when the frame is gone", () => {
     registry.handleRegister("frame-1", "reg-1", TEST_TOOL);
     adapter.simulateFrameGone("frame-1");
@@ -116,6 +125,33 @@ describe("ToolRegistry", () => {
     await expect(
       registry.invoke("search-cars", {}, new AbortController().signal),
     ).rejects.toThrow(/timed out/);
+  });
+
+  it("routes executeForward to the owner and returns executeForwardResult to the caller", async () => {
+    registry.handleRegister("frame-1", "reg-1", TEST_TOOL);
+    registry.handleExecuteForward("frame-2", "req-7", "search-cars", { make: "BMW" }, "https://caller.example");
+
+    const forwarded = adapter.frames.get("frame-1")?.find((m) => m.kind === "execute") as
+      | { invocationId: string; name: string }
+      | undefined;
+    expect(forwarded).toBeDefined();
+    registry.handleExecuteResult(forwarded!.invocationId, true, '{"ok":1}');
+
+    const reply = adapter.frames.get("frame-2")?.find((m) => m.kind === "executeForwardResult") as
+      | { requestId: string; ok: boolean; result?: string }
+      | undefined;
+    expect(reply).toMatchObject({ requestId: "req-7", ok: true, result: '{"ok":1}' });
+  });
+
+  it("refuses executeForward for exposedTo tools from other origins", async () => {
+    registry.handleRegister("frame-1", "reg-1", TEST_TOOL, ["https://trusted.example"]);
+    registry.handleExecuteForward("frame-2", "req-8", "search-cars", {}, "https://stranger.example");
+
+    const reply = adapter.frames.get("frame-2")?.find((m) => m.kind === "executeForwardResult") as
+      | { requestId: string; ok: boolean; errorCode?: string }
+      | undefined;
+    expect(reply).toMatchObject({ requestId: "req-8", ok: false, errorCode: "SecurityError" });
+    expect(adapter.frames.get("frame-1")?.some((m) => m.kind === "execute") ?? false).toBe(false);
   });
 });
 
@@ -193,6 +229,24 @@ describe("local MCP server (HTTP)", () => {
     await rpc(server.url, server.token, INIT);
     const list = await rpc(server.url, server.token, { jsonrpc: "2.0", id: 2, method: "tools/list" });
     expect(list.json.result.tools).toHaveLength(0);
+  });
+
+  it("refuses tools/call for exposedTo tools even when invoked by name", async () => {
+    const server = await startLocalMcpServer({ appName: "Demo", appVersion: "1", registry });
+    closeServer = server.close;
+    registry.handleRegister("frame-1", "reg-1", TEST_TOOL, ["app://internal-agent"]);
+    await rpc(server.url, server.token, INIT);
+    const call = await rpc(server.url, server.token, {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "search-cars", arguments: { make: "BMW" } },
+    });
+    const result = await call.json;
+    // Must be refused at the gate — never routed to the webview.
+    expect(adapter.frames.get("frame-1")?.some((m) => m.kind === "execute") ?? false).toBe(false);
+    expect(result.result.isError).toBe(true);
+    expect(result.result.content[0].text).toMatch(/reserved for in-page agents/);
   });
 
   it("supports the confirmToolCall gate", async () => {

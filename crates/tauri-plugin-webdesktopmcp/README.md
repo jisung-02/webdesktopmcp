@@ -57,4 +57,4 @@ webdesktopmcp connect --app "내 앱"   # stdio 셈 (Claude Desktop)
 
 - `cargo check` / `cargo build` — 에러·경고 0
 - `cargo test` — 19 유닛 + 2 통합(실제 HTTP 스모크, 레지스트리 파일) 통과
-- 제한: MCP 클라이언트 연결 끊김 → abort 전파 없음(타임아웃 시 전파), Windows에서 데드-pid 프루닝 no-op, 전체 Tauri 앱 라이브 테스트는 미수행(컴파일 + 21개 자동 테스트로 담보)
+- 제한: MCP 클라이언트 연결 끊김 → abort 전파 없음(타임아웃 시 전파), Windows에서 데드-pid 프루닝 no-op, 전체 Tauri 앱 라이브 테스트는 미수행(컴파일 + 21개 자동 테스트로 담보). 리로드 시 재등록은 교체로 처리되지만, 새 페이지가 등록하지 않는 이전 도구는 창이 닫힐 때까지 남을 수 있음(TS 어댑터의 `did-navigate` 정리와 달리 내비게이션 전체 정리는 미구현).

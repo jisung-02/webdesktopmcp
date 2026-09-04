@@ -174,6 +174,14 @@ export function installWebDesktopMcp(options: WebDesktopMcpOptions): WebDesktopM
 
   const onWebContentsCreated = (_event: unknown, wc: Electron.WebContents): void => {
     ensureSessionPreload(wc.session);
+    // A committed navigation replaces the document, and W3C tools are
+    // per-document: drop the old document's tools. In-page (pushState)
+    // navigations fire `did-navigate-in-page` instead, so SPA routes keep
+    // their tools. Reloads re-register afterwards (same-frame register
+    // replaces in the registry), so this is safe across the dev loop.
+    wc.on("did-navigate", () => {
+      for (const cb of frameGoneCallbacks) cb(String(wc.id));
+    });
     wc.once("destroyed", () => {
       for (const cb of frameGoneCallbacks) cb(String(wc.id));
     });
@@ -203,6 +211,12 @@ export function installWebDesktopMcp(options: WebDesktopMcpOptions): WebDesktopM
       );
       return server;
     });
+  });
+  // Surface startup failures even when the app never awaits `ready`.
+  ready.catch((err: unknown) => {
+    log(
+      `MCP server failed to start: ${err instanceof Error ? err.message : String(err)} — agents cannot connect until this is fixed (port conflict?).`,
+    );
   });
 
   const handle: WebDesktopMcpHandle = {

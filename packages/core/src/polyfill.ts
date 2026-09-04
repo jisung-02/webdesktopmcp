@@ -451,7 +451,18 @@ export function installModelContextPolyfill(
   };
   (globalThis as unknown as Record<string, unknown>).__webDesktopMcp = {
     version: PROTOCOL_VERSION,
+    mode: "polyfill",
     internals,
+    // Console debug helper: __webDesktopMcp.listTools()
+    listTools: () =>
+      mc.registeredToolNames.map((name) => {
+        const entry = mc.findLocal(name);
+        return {
+          name,
+          description: entry?.declaration.description ?? "",
+          inputSchema: entry?.declaration.inputSchema,
+        };
+      }),
   };
 
   const declarativeDispose =

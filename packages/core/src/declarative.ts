@@ -220,7 +220,12 @@ export function setupDeclarativeApi(mc: ModelContext, log: Log): () => void {
         previous !== compiled.name ||
         form.dataset.webmcpCompiled !== fingerprint(form);
       if (!changed) continue;
-      if (previous && previous !== compiled.name) {
+      // Unregister first — including the same-name case (attribute edits
+      // change the fingerprint), otherwise the re-register would hit the
+      // per-document duplicate check. #forgetLocal runs synchronously inside
+      // unregisterTool, so ordering is safe; the host sees unregister →
+      // register in IPC order.
+      if (previous) {
         void mc.unregisterTool(previous).catch(() => {});
       }
       // Optimistic: the tool is live app-wide as soon as the host processes

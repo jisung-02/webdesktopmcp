@@ -4,6 +4,7 @@
  * (Electron/Tauri/Wails) inject this single entry point.
  */
 
+import { PROTOCOL_VERSION } from "@webdesktopmcp/protocol";
 import type { HostBridgeLike, InstalledPolyfill, PolyfillInstallOptions } from "./types.js";
 import { installModelContextPolyfill } from "./polyfill.js";
 import { installNativeModelContextMirror, type NativeMirrorHandle } from "./native-mirror.js";
@@ -34,7 +35,15 @@ export function bootstrapWebDesktopMcp(options: BootstrapOptions): BootstrapHand
 
   if (hasNative && preference !== "force-polyfill") {
     const mirror = installNativeModelContextMirror(options.bridge, options.log ?? (() => {}));
-    if (mirror) return wrapMirror(mirror);
+    if (mirror) {
+      // Console debug helper, same shape as the polyfill installs.
+      (globalThis as unknown as Record<string, unknown>).__webDesktopMcp = {
+        version: PROTOCOL_VERSION,
+        mode: "native-mirror",
+        listTools: () => mirror.listTools(),
+      };
+      return wrapMirror(mirror);
+    }
     if (preference === "require-native") {
       options.log?.("error", "[webdesktopmcp] require-native set but mirroring failed.");
       return null;

@@ -81,7 +81,7 @@ const win = new BrowserWindow({
 });
 ```
 
-レンダラーでは上記の標準 `document.modelContext.registerTool` コードを書くだけです。**宣言型フォーム API** もサポート — JavaScript なしでフォームがそのままツールになります:
+レンダラーでは上記の標準 `document.modelContext.registerTool` コードを書くだけです。型推論が必要なら `@webdesktopmcp/core` の `defineTool` ヘルパーを使います（`execute` 内で入力型が推論されます）。デバッグ中は DevTools コンソールで `window.__webDesktopMcp.listTools()` を呼ぶとページが登録したツール一覧を確認できます。**宣言型フォーム API** もサポート — JavaScript なしでフォームがそのままツールになります:
 
 ```html
 <form toolname="order-coffee"
@@ -122,6 +122,9 @@ mcp.SetEventEmitter(func(event string, data ...interface{}) { runtime.EventsEmit
 ```bash
 # 起動中のアプリ一覧
 npx @webdesktopmcp/cli list
+
+# 起動中アプリのツール一覧を確認
+npx @webdesktopmcp/cli tools --app "MyApp"
 
 # Claude Desktop (stdio) — claude_desktop_config.json:
 { "mcpServers": { "MyApp": { "command": "npx",

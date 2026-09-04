@@ -139,6 +139,20 @@ fn call_tool(core: &RpcCore, params: &Value) -> Value {
     }
     let input = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
 
+    // Exposure is enforced on calls, not just listings (parity with the TS
+    // reference server): exposed_to tools are reserved for in-page agents.
+    {
+        let reg = registry::lock(&core.registry);
+        if let Some(info) = reg.get(&name) {
+            if !info.exposed_to.is_empty() {
+                drop(reg);
+                return error_result(&format!(
+                    "Tool \"{name}\" is reserved for in-page agents (exposed_to) and is not callable by external clients."
+                ));
+            }
+        }
+    }
+
     let started = {
         let mut reg = registry::lock(&core.registry);
         reg.begin_invoke(&name, input)
@@ -244,6 +258,37 @@ mod tests {
         let tools = response["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1, "exposedTo tools must be hidden: {tools:?}");
         assert_eq!(tools[0]["name"], "visible");
+    }
+
+    #[test]
+    fn tools_call_refuses_exposed_to_by_name() {
+        let (core, _registry, sink) = setup();
+        register(&core, "agent_only", vec!["http://localhost:3000".to_string()]);
+
+        let body = json!({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": { "name": "agent_only", "arguments": {} }
+        });
+        let response = handle_json_rpc(&core, &body).unwrap();
+        let result = &response["result"];
+        assert_eq!(result["isError"], json!(true), "exposed_to must refuse: {result:?}");
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(text.contains("reserved for in-page agents"), "text: {text}");
+        // The call must be refused at the gate — never routed to the webview.
+        assert!(
+            sink.messages.lock().unwrap().is_empty(),
+            "no execute may be sent for an exposed_to tool"
+        );
+    }
+
+    #[test]
+    fn tools_list_sets_meta() {
+        let (core, _registry, _sink) = setup();
+        register(&core, "visible", vec![]);
+
+        let body = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+        let response = handle_json_rpc(&core, &body).unwrap();
+        let tools = response["result"]["tools"].as_array().unwrap();
         assert_eq!(tools[0]["description"], "visible desc");
         // Raw JSON Schema passthrough with the spec default when absent.
         assert_eq!(tools[0]["inputSchema"], json!({ "type": "object", "properties": {} }));

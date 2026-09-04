@@ -15,11 +15,14 @@ import type { HostBridgeLike, PolyfillInstallOptions } from "./types.js";
 
 interface MirroredTool {
   name: string;
+  description: string;
   execute: (input: Record<string, unknown>, options: { signal: AbortSignal }) => Promise<unknown>;
 }
 
 export interface NativeMirrorHandle {
   dispose(): void;
+  /** Debug helper: mirrored registrations seen so far. */
+  listTools(): { name: string; description: string }[];
 }
 
 export function installNativeModelContextMirror(
@@ -47,7 +50,7 @@ export function installNativeModelContextMirror(
     if (!isObjectTool(t)) {
       return callOriginal(tool, options);
     }
-    mirrored.set(t.name, { name: t.name, execute: t.execute });
+    mirrored.set(t.name, { name: t.name, description: t.description, execute: t.execute });
     bridge.send({
       kind: "register",
       invocationId: `mirror-${t.name}-${Date.now()}`,
@@ -120,6 +123,9 @@ export function installNativeModelContextMirror(
       mirrored.clear();
       for (const c of invocations.values()) c.abort();
       invocations.clear();
+    },
+    listTools() {
+      return [...mirrored.values()].map(({ name, description }) => ({ name, description }));
     },
   };
 }

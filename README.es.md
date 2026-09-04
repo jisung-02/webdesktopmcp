@@ -81,7 +81,7 @@ const win = new BrowserWindow({
 });
 ```
 
-En el renderer basta con usar el código estándar `document.modelContext.registerTool` mostrado arriba. También está soportada la **API declarativa de formularios** — un formulario se convierte en herramienta sin una sola línea de JavaScript:
+En el renderer basta con usar el código estándar `document.modelContext.registerTool` mostrado arriba. Para inferencia de tipos usa el helper `defineTool` de `@webdesktopmcp/core` (el tipo de la entrada se infiere dentro de `execute`). Al depurar, `window.__webDesktopMcp.listTools()` en la consola de DevTools muestra las herramientas registradas. También está soportada la **API declarativa de formularios** — un formulario se convierte en herramienta sin una sola línea de JavaScript:
 
 ```html
 <form toolname="order-coffee"
@@ -122,6 +122,9 @@ Consulta el README de cada directorio para más detalles.
 ```bash
 # Listar aplicaciones en ejecución
 npx @webdesktopmcp/cli list
+
+# Ver las herramientas de una app en ejecución
+npx @webdesktopmcp/cli tools --app "MyApp"
 
 # Claude Desktop (stdio) — claude_desktop_config.json:
 { "mcpServers": { "MyApp": { "command": "npx",

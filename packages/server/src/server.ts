@@ -85,6 +85,14 @@ export async function startLocalMcpServer(options: LocalServerOptions): Promise<
       if (!tool) {
         return errorResult(`Unknown tool "${name}". It may have been unregistered by the app.`);
       }
+      // Exposure is enforced on calls, not just listings: a tool reserved for
+      // in-page agents via `exposedTo` must not be invocable by external
+      // clients that simply read its name out of band.
+      if (tool.exposedTo && tool.exposedTo.length > 0) {
+        return errorResult(
+          `Tool "${name}" is reserved for in-page agents (exposedTo) and is not callable by external clients.`,
+        );
+      }
       const input = request.params.arguments ?? {};
       if (options.confirmToolCall) {
         try {

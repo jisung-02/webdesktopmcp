@@ -62,11 +62,11 @@ ToolDeclaration & { origin: string, frameId: string, exposedTo?: string[] }
 
 1. **frameId**: 웹뷰별 고유 라벨 (Electron: `webContents.id` 문자열, Tauri: webview label, Wails: 창 이름).
 2. **origin 스탬프**: `register` 수신 시 해당 웹뷰의 origin(`http://localhost:3000`, `file://...`, `tauri://localhost` 등)을 기록.
-3. **이름 유니크 강제**: 앱 전체에서 도구 이름 유니크. 중복 시 해당 프레임에 `ok:false` + 이유.
+3. **이름 유니크 강제**: 앱 전체에서 도구 이름 유니크. **다른 프레임**이 같은 이름 등록 시 `ok:false` + 이유. **같은 프레임**의 재등록(리로드·속성 갱신)은 기존 항목을 교체한다 — 페이지가 문서 아래에서 바뀌었는데 도구가 남아있으면 안 된다.
 4. **MCP 노출**: 레지스트리의 도구를 Streamable-HTTP MCP 서버로 노출.
    - 바인딩: `127.0.0.1` 전용, Bearer 토큰 필수, `GET /mcp?health=1`은 무인증 헬스체크.
    - `tools/list`: `exposedTo`가 설정된 도구는 외부 클라이언트에 숨김 (인페이지 에이전트 전용).
-   - `tools/call`: 소유 프레임에 `execute` 전송 → `executeResult` 대기 → 결과(JSON 문자열)를 text content로 반환. 타임아웃 권장: 120초.
+   - `tools/call`: **`exposedTo` 도구는 이름으로 직접 호출해도 게이트에서 거부**한다(웹뷰로 라우팅 금지). 이후 소유 프레임에 `execute` 전송 → `executeResult` 대기 → 결과(JSON 문자열)를 text content로 반환. 타임아웃 권장: 120초.
    - `abort`: MCP 클라이언트 취소 시 프레임에 `abort` 전송.
 5. **프레임 소멸**: 웹뷰 종료 시 그 프레임의 도구를 모두 제거.
 6. **확인 다이얼로그 훅**: `tools/call` 전에 네이티브 confirm 콜백 호출 기회 제공 (민감 작업 보호).

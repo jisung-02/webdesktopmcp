@@ -292,6 +292,12 @@ func (s *Server) toolsCall(ctx context.Context, params json.RawMessage) any {
 		return toolErrorResult(fmt.Sprintf("Unknown tool %q. It may have been unregistered by the app.", p.Name))
 	}
 
+	// Exposure is enforced on calls, not just listings (parity with the TS
+	// reference server): exposedTo tools are reserved for in-page agents.
+	if len(tool.exposedTo) > 0 {
+		return toolErrorResult(fmt.Sprintf("Tool %q is reserved for in-page agents (exposedTo) and is not callable by external clients.", p.Name))
+	}
+
 	input := p.Arguments
 	if input == nil {
 		input = map[string]any{}

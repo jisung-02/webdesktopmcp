@@ -81,7 +81,7 @@ const win = new BrowserWindow({
 });
 ```
 
-渲染进程里直接使用上面的标准 `document.modelContext.registerTool` 代码即可。还支持**声明式表单 API** — 无需一行 JavaScript,表单即是工具:
+渲染进程里直接使用上面的标准 `document.modelContext.registerTool` 代码即可。需要类型推断时可用 `@webdesktopmcp/core` 的 `defineTool` 辅助函数（`execute` 内会推断输入类型）。调试时可在 DevTools 控制台调用 `window.__webDesktopMcp.listTools()` 查看页面注册的工具。还支持**声明式表单 API** — 无需一行 JavaScript,表单即是工具:
 
 ```html
 <form toolname="order-coffee"
@@ -122,6 +122,9 @@ mcp.SetEventEmitter(func(event string, data ...interface{}) { runtime.EventsEmit
 ```bash
 # 查看运行中的应用
 npx @webdesktopmcp/cli list
+
+# 查看运行中应用的工具列表
+npx @webdesktopmcp/cli tools --app "MyApp"
 
 # Claude Desktop (stdio) — claude_desktop_config.json:
 { "mcpServers": { "MyApp": { "command": "npx",

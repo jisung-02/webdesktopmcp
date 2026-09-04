@@ -426,6 +426,36 @@ func TestToolsListHidesExposedTo(t *testing.T) {
 	}
 }
 
+func TestToolsCallRefusesExposedToByName(t *testing.T) {
+	env := newTestServer(t)
+	mustRegister(t, env, "frameB", "secret_tool", func(msg map[string]any) {
+		msg["exposedTo"] = []string{"http://agent.internal"}
+	})
+
+	// Hidden from listings AND refused on direct call — the call must never
+	// reach the owning frame.
+	status, body := postMCP(t, env.s, "tools/call", map[string]any{
+		"name":      "secret_tool",
+		"arguments": map[string]any{},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	result := body["result"].(map[string]any)
+	if result["isError"] != true {
+		t.Fatalf("expected isError result, got %v", result)
+	}
+	content := result["content"].([]any)[0].(map[string]any)
+	if text, _ := content["text"].(string); !strings.Contains(text, "reserved for in-page agents") {
+		t.Fatalf("unexpected error text: %v", text)
+	}
+	for _, msg := range env.rec.snapshot() {
+		if msg["kind"] == "execute" {
+			t.Fatalf("exposedTo tool was routed to the webview: %v", msg)
+		}
+	}
+}
+
 func TestUnregisterAndFrameGone(t *testing.T) {
 	env := newTestServer(t)
 	mustRegister(t, env, "frameA", "temp_tool", nil)

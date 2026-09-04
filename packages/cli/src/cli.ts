@@ -50,6 +50,16 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+async function connectUpstream(entry: AppRegistryEntry): Promise<Client> {
+  const client = new Client({ name: "webdesktopmcp-cli", version: "0.1.0" });
+  await client.connect(
+    new StreamableHTTPClientTransport(new URL(entry.url), {
+      requestInit: { headers: { authorization: `Bearer ${entry.token}` } },
+    }),
+  );
+  return client;
+}
+
 async function findApp(appName: string, registryDir?: string, waitSeconds = 5): Promise<AppRegistryEntry> {
   const deadline = Date.now() + waitSeconds * 1000;
   let lastError = `No app named "${appName}" in the registry.`;
@@ -91,10 +101,11 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (command !== "connect") {
+  if (command !== "connect" && command !== "tools") {
     console.error(`Usage:
-  webdesktopmcp connect --app <name> [--registry <dir>] [--wait <sec>]
-  webdesktopmcp list`);
+  webdesktopmcp connect --app <name> [--registry <dir>] [--wait <sec>]   stdio shim for MCP clients
+  webdesktopmcp tools --app <name> [--registry <dir>]                    inspect a running app's tools
+  webdesktopmcp list                                                     list running apps`);
     process.exit(command ? 1 : 0);
   }
   if (!args.app) {
@@ -105,15 +116,25 @@ async function main(): Promise<void> {
   const entry = await findApp(args.app, args.registry, Number(args.wait ?? "5"));
   console.error(`[webdesktopmcp] Connecting to ${entry.appName} at ${entry.url} …`);
 
-  const upstream = new Client({ name: "webdesktopmcp-shim", version: "0.1.0" });
-  await upstream.connect(
-    new StreamableHTTPClientTransport(new URL(entry.url), {
-      requestInit: { headers: { authorization: `Bearer ${entry.token}` } },
-    }),
-  );
+  const upstream = await connectUpstream(entry);
+
+  if (command === "tools") {
+    const { tools } = await upstream.listTools();
+    if (tools.length === 0) {
+      console.error(`[webdesktopmcp] ${entry.appName} has no registered tools (is the page loaded?).`);
+    }
+    for (const tool of tools) {
+      const required = ((tool.inputSchema as { required?: string[] } | undefined)?.required ?? []).join(", ");
+      console.log(`${tool.name}`);
+      console.log(`  ${tool.description ?? ""}`);
+      if (required) console.log(`  required: ${required}`);
+    }
+    await upstream.close();
+    return;
+  }
 
   const downstream = new Server(
-    { name: entry.appName, version: entry.protocolVersion >= 1 ? "webdesktopmcp" : "1.0.0" },
+    { name: entry.appName, version: "1.0.0" },
     { capabilities: { tools: {} } },
   );
 

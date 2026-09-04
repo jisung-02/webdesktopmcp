@@ -81,7 +81,20 @@ const win = new BrowserWindow({
 });
 ```
 
-렌더러에서는 위의 `document.modelContext.registerTool` 표준 코드만 쓰면 됩니다. **HTML 폼 선언형 API**도 지원합니다 — JS 한 줄 없이 폼이 곧 도구:
+렌더러에서는 위의 `document.modelContext.registerTool` 표준 코드만 쓰면 됩니다. 타입 추론이 필요하면 `@webdesktopmcp/core`의 `defineTool` 헬퍼를 쓰세요(반환값은 그냥 `ModelContextTool` — `execute` 안에서 입력 타입이 추론됩니다):
+
+```ts
+import { defineTool } from "@webdesktopmcp/core";
+
+const search = defineTool<{ keyword: string }>({
+  name: "search-notes",
+  description: "키워드로 메모를 검색한다",
+  inputSchema: { /* … */ },
+  execute: async ({ keyword }) => { /* keyword: string ✅ */ },
+});
+```
+
+디버깅 중에는 DevTools 콘솔에서 `window.__webDesktopMcp.listTools()`로 페이지가 등록한 도구를 볼 수 있습니다. **HTML 폼 선언형 API**도 지원합니다 — JS 한 줄 없이 폼이 곧 도구:
 
 ```html
 <form toolname="order-coffee"
@@ -122,6 +135,9 @@ mcp.SetEventEmitter(func(event string, data ...interface{}) { runtime.EventsEmit
 ```bash
 # 실행 중인 앱 보기
 npx @webdesktopmcp/cli list
+
+# 실행 중인 앱의 도구 목록·필수 파라미터 조회
+npx @webdesktopmcp/cli tools --app "내 앱"
 
 # Claude Desktop (stdio) — claude_desktop_config.json:
 { "mcpServers": { "내 앱": { "command": "npx",

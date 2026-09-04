@@ -81,7 +81,20 @@ const win = new BrowserWindow({
 });
 ```
 
-In the renderer, just use the standard `document.modelContext.registerTool` code shown above. **Declarative form API** is supported too — a form becomes a tool with zero JavaScript:
+In the renderer, just use the standard `document.modelContext.registerTool` code shown above. For typed inputs, use the `defineTool` helper from `@webdesktopmcp/core` (the object it returns is a plain `ModelContextTool` — input types are inferred inside `execute`):
+
+```ts
+import { defineTool } from "@webdesktopmcp/core";
+
+const search = defineTool<{ keyword: string }>({
+  name: "search-notes",
+  description: "Search notes by keyword",
+  inputSchema: { /* … */ },
+  execute: async ({ keyword }) => { /* keyword: string ✅ */ },
+});
+```
+
+While debugging, `window.__webDesktopMcp.listTools()` in DevTools shows everything the page registered, and **declarative form API** is supported too — a form becomes a tool with zero JavaScript:
 
 ```html
 <form toolname="order-coffee"
@@ -122,6 +135,9 @@ See each directory's README for details.
 ```bash
 # List running apps
 npx @webdesktopmcp/cli list
+
+# Inspect a running app's tools (names, descriptions, required params)
+npx @webdesktopmcp/cli tools --app "MyApp"
 
 # Claude Desktop (stdio) — claude_desktop_config.json:
 { "mcpServers": { "MyApp": { "command": "npx",
