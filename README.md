@@ -1,17 +1,19 @@
 # webdesktopmcp
 
-**데스크톱 앱(Electron · Tauri · Wails)의 웹뷰를 WebMCP 서버로 바꿔주는 라이브러리.**
+**Turn desktop apps (Electron · Tauri · Wails) into WebMCP servers.**
 
-앱 개발자가 몇 줄만 추가하면, 앱의 기능이 AI 에이전트(Claude Desktop, Claude Code, Cursor, ChatGPT Desktop 등)에게 도구(tool)로 노출됩니다. 페이지 코드는 [W3C WebMCP 드래프트](https://webmachinelearning.github.io/webmcp/)의 표준 API(`document.modelContext`)를 그대로 사용합니다.
+English | [한국어](README.ko.md) | [日本語](README.ja.md) | [中文](README.zh.md) | [Français](README.fr.md) | [Español](README.es.md)
+
+With a few lines of code, desktop app developers can expose their app's features as **tools for AI agents** (Claude Desktop, Claude Code, Cursor, ChatGPT Desktop, …). Your page code uses the standard [W3C WebMCP draft](https://webmachinelearning.github.io/webmcp/) API (`document.modelContext`) as-is — and the library automatically switches to the real native API when the runtime ships it.
 
 ```ts
-// 앱 코드 — W3C WebMCP 표준 API 그대로
+// App code — the standard W3C WebMCP API, unchanged
 document.modelContext.registerTool({
   name: "search-orders",
-  description: "주문번호로 주문을 검색한다",
+  description: "Search orders by order number or customer name",
   inputSchema: {
     type: "object",
-    properties: { query: { type: "string", description: "주문번호 또는 고객명" } },
+    properties: { query: { type: "string", description: "Order number or customer name" } },
     required: ["query"],
   },
   annotations: { readOnlyHint: true },
@@ -20,80 +22,81 @@ document.modelContext.registerTool({
 ```
 
 ```jsonc
-// Claude Desktop 설정 — 앱이 실행 중이면 에이전트가 위 도구를 호출한다
-{ "mcpServers": { "내앱": {
-    "command": "npx", "args": ["-y", "@webdesktopmcp/cli", "connect", "--app", "내앱"] } } }
+// Claude Desktop config — once the app is running, agents can call the tools above
+{ "mcpServers": { "MyApp": {
+    "command": "npx", "args": ["-y", "@webdesktopmcp/cli", "connect", "--app", "MyApp"] } } }
 ```
 
-## 동작 방식
+## How it works
 
-데스크톱 웹뷰에는 네이티브 WebMCP API가 없기 때문에(Electron의 Chromium은 149 미만, Tauri는 WKWebView/WebView2), 라이브러리가 세 계층을 브리징합니다:
+Desktop webviews don't ship the native WebMCP API yet (Electron's Chromium is below 149; Tauri uses WKWebView/WebView2), so the library bridges three layers:
 
 ```
-[웹뷰의 페이지]
-  document.modelContext.registerTool(...)     ← 폴리필 또는 네이티브 미러 (같은 API)
-        │  IPC — docs/protocol.md 와이어 프로토콜
+[Page inside the webview]
+  document.modelContext.registerTool(...)     ← polyfill or native mirror (same API)
+        │  IPC — wire protocol in docs/protocol.md
         ▼
-[네이티브 호스트]  Electron main / Tauri(Rust) / Wails(Go)
-  도구 레지스트리 + 로컬 MCP 서버 (127.0.0.1, Bearer 토큰)
+[Native host]  Electron main / Tauri (Rust) / Wails (Go)
+  Tool registry + local MCP server (127.0.0.1, bearer token)
         │
-        ├─ Streamable HTTP  ← Cursor, Claude Code 등 직접 연결
-        └─ @webdesktopmcp/cli (stdio 셈)  ← Claude Desktop 등
+        ├─ Streamable HTTP   ← Cursor, Claude Code, … connect directly
+        └─ @webdesktopmcp/cli (stdio shim) ← Claude Desktop, …
 ```
 
-**네이티브 우선 전략(버전 게이트)** — Electron 어댑터는 `process.versions.chrome`을 보고:
-- **Chromium ≥ 149** → `--enable-blink-features=WebMCP` 스위치로 네이티브 WebMCP를 켜고, 페이지는 **진짜 네이티브 `document.modelContext`**를 씁니다. 어댑터는 `registerTool`만 투명하게 래핑해 등록을 외부로 미러링합니다(내장 에이전트는 네이티브 경로 그대로).
-- **미만**(현재 전체) → W3C 스펠 시맨틱을 구현한 폴리필을 심습니다. 네이티브가 생기면 자동 전환됩니다.
+**Native-first version gate** — the Electron adapter checks `process.versions.chrome`:
 
-## 패키지
+- **Chromium ≥ 149** → enables native WebMCP via the `--enable-blink-features=WebMCP` switch. The page uses the **real native `document.modelContext`**; the adapter only wraps `registerTool` transparently to mirror registrations out to external agents (built-in browser agents keep using the native path).
+- **Below 149** (everything today) → injects a polyfill implementing the W3C semantics. The switch is automatic — no app code changes.
 
-| 패키지 | 언어 | 용도 |
+## Packages
+
+| Package | Language | Purpose |
 |---|---|---|
-| [`@webdesktopmcp/protocol`](packages/protocol) | TS | 웹뷰↔호스트 와이어 프로토콜 ([명세](docs/protocol.md)) |
-| [`@webdesktopmcp/core`](packages/core) | TS | `document.modelContext` 폴리필 + 네이티브 미러 + 선언형 폼 API |
-| [`@webdesktopmcp/server`](packages/server) | TS | 프레임워크 독립 로컬 MCP 서버 + 앱 레지스트리 |
-| [`@webdesktopmcp/electron`](packages/electron) | TS | Electron 어댑터 (preload 자동 주입, 버전 게이트, 확인 다이얼로그 훅) |
-| [`@webdesktopmcp/cli`](packages/cli) | TS | `webdesktopmcp connect --app <이름>` stdio 셈 |
-| `crates/tauri-plugin-webdesktopmcp` | Rust | Tauri v2 플러그인 |
-| `go/webdesktopmcp` | Go | Wails v2 패키지 |
+| [`@webdesktopmcp/protocol`](packages/protocol) | TS | Wire protocol shared by the TS/Rust/Go hosts ([spec](docs/protocol.md)) |
+| [`@webdesktopmcp/core`](packages/core) | TS | `document.modelContext` polyfill + native mirror + declarative form API |
+| [`@webdesktopmcp/server`](packages/server) | TS | Framework-agnostic local MCP server + app registry |
+| [`@webdesktopmcp/electron`](packages/electron) | TS | Electron adapter (auto preload injection, version gate, confirmation hook) |
+| [`@webdesktopmcp/cli`](packages/cli) | TS | `webdesktopmcp connect --app <name>` stdio shim |
+| `crates/tauri-plugin-webdesktopmcp` | Rust | Tauri v2 plugin |
+| `go/webdesktopmcp` | Go | Wails v2 package |
 
-## Electron 빠른 시작
+## Electron quick start
 
 ```bash
 npm i @webdesktopmcp/electron
 ```
 
 ```js
-// main.js — app.whenReady() 전에
+// main.js — before app.whenReady()
 const { installWebDesktopMcp } = require("@webdesktopmcp/electron");
 const mcp = installWebDesktopMcp({
-  appName: "내 앱",
+  appName: "MyApp",
   appVersion: "1.0.0",
-  // 민감한 도구는 네이티브 확인 다이얼로그로 게이트 (선택)
+  // Gate sensitive tools behind a native confirmation dialog (optional)
   confirmToolCall: async (tool, input) => { /* dialog… */ return true; },
 });
 
 const win = new BrowserWindow({
-  webPreferences: { preload: mcp.preloadPath },  // 명시 권장 (세션 자동 등록도 있음)
+  webPreferences: { preload: mcp.preloadPath },  // recommended (session auto-registration also exists)
 });
 ```
 
-렌더러에서는 위의 `document.modelContext.registerTool` 표준 코드만 쓰면 됩니다. **HTML 폼 선언형 API**도 지원합니다 — JS 한 줄 없이 폼이 곧 도구:
+In the renderer, just use the standard `document.modelContext.registerTool` code shown above. **Declarative form API** is supported too — a form becomes a tool with zero JavaScript:
 
 ```html
 <form toolname="order-coffee"
-      tooldescription="커피를 주문한다. 음료 종류와 샷 수를 받아 주문 번호를 반환한다."
+      tooldescription="Order a coffee. Takes a drink type and shot count, returns an order number."
       toolautosubmit>
-  <select name="drink" toolparamdescription="음료 종류">
+  <select name="drink" toolparamdescription="Drink type">
     <option value="americano">americano</option>
     <option value="latte">latte</option>
   </select>
-  <input type="number" name="shots" toolparamdescription="샷 수" value="1" />
-  <button type="submit">주문</button>
+  <input type="number" name="shots" toolparamdescription="Number of shots" value="1" />
+  <button type="submit">Order</button>
 </form>
 ```
 
-폼의 submit 핸들러에서 `event.respondWith(result)`를 호출하면 그 값이 에이전트에게 반환됩니다(`event.agentInvoked`로 에이전트 호출 여부 판별 가능 — 드래프트의 `SubmitEvent#respondWith`를 폴리필).
+Call `event.respondWith(result)` in the form's submit handler and that value is returned to the agent (`event.agentInvoked` tells you an agent submitted the form — the draft's `SubmitEvent#respondWith`, polyfilled).
 
 ## Tauri (v2) / Wails (v2)
 
@@ -101,58 +104,58 @@ const win = new BrowserWindow({
 // Tauri — Rust
 tauri::Builder::default()
     .plugin(tauri_plugin_webdesktopmcp::init(
-        tauri_plugin_webdesktopmcp::WebDesktopMcpConfig::new("내 앱", "1.0.0"),
+        tauri_plugin_webdesktopmcp::WebDesktopMcpConfig::new("MyApp", "1.0.0"),
     ))
 ```
 
 ```go
 // Wails — Go
-mcp, _ := webdesktopmcp.New(webdesktopmcp.Config{AppName: "내 앱", AppVersion: "1.0.0"})
+mcp, _ := webdesktopmcp.New(webdesktopmcp.Config{AppName: "MyApp", AppVersion: "1.0.0"})
 mcp.SetEventEmitter(func(event string, data ...interface{}) { runtime.EventsEmit(ctx, event, data...) })
-// options.Bind에 mcp 추가 + index.html에 mcp.InitScript() 삽입
+// add mcp to options.Bind + inject mcp.InitScript() into index.html
 ```
 
-각 디렉터리의 README를 참고하세요.
+See each directory's README for details.
 
-## 에이전트 연결
+## Connecting agents
 
 ```bash
-# 실행 중인 앱 보기
+# List running apps
 npx @webdesktopmcp/cli list
 
-# Claude Desktop (stdio) — ~/.claude/claude_desktop_config.json 또는 앱 설정에:
-{ "mcpServers": { "내앱": { "command": "npx",
-    "args": ["-y", "@webdesktopmcp/cli", "connect", "--app", "내 앱"] } } }
+# Claude Desktop (stdio) — claude_desktop_config.json:
+{ "mcpServers": { "MyApp": { "command": "npx",
+    "args": ["-y", "@webdesktopmcp/cli", "connect", "--app", "MyApp"] } } }
 
-# Cursor / Claude Code 등 HTTP 지원 클라이언트 — 앱이 출력한 값 사용:
+# HTTP-capable clients (Cursor, Claude Code, …) — use what the app printed:
 #   URL:   http://127.0.0.1:<port>/mcp
-#   Token: ~/.webdesktopmcp/registry.json 의 apps["내 앱"].token
+#   Token: apps["MyApp"].token in ~/.webdesktopmcp/registry.json
 ```
 
-엔드포인트는 `127.0.0.1`에만 바인딩되고 Bearer 토큰이 필요합니다. 보안 모델은 [docs/security.md](docs/security.md).
+The endpoint binds to `127.0.0.1` only and requires a bearer token. Security model: [docs/security.md](docs/security.md).
 
-## 데모
+## Demo
 
 ```bash
 pnpm install
 pnpm --filter webdesktopmcp-electron-demo start
-# 앱 실행 중에 다른 터미널에서:
+# in another terminal, while the app is running:
 node packages/cli/dist/cli.js list
 ```
 
-데모 앱(예제: `examples/electron-demo`)은 필수형 도구 4개 + 선언형 폼 도구(`order-coffee`)를 노출합니다. Claude Desktop에서 *"열린 할 일 보여줘"*, *"라떼 2샷 주문해줘"* 를 말해보세요.
+The demo app (`examples/electron-demo`) exposes 4 imperative tools plus a declarative form tool (`order-coffee`). From Claude Desktop, try *"show me open tasks"* or *"order a latte with 2 shots"*.
 
-## 검증 상태
+## Verification status
 
-- `@webdesktopmcp/core` — vitest **19/19** (폴리필 시맨틱, 선언형 폼, 네이티브 미러)
-- `@webdesktopmcp/server` — vitest **9/9** (레지스트리, HTTP MCP initialize/list/call, 인증, 노출 필터, 확인 훅)
-- Electron 데모 — **실제 앱 E2E 검증 완료**: 앱 기동 → preload 주입 → 도구 5개 등록 → HTTP `tools/call`로 필수형·선언형 도구 실행 → CLI stdio 셈 경유 호출까지 확인
-- Tauri(Rust) / Wails(Go) — `cargo check`/`go build` 기준 검증 (세부는 각 디렉터리 README)
+- `@webdesktopmcp/core` — vitest **19/19** (polyfill semantics, declarative forms, native mirror)
+- `@webdesktopmcp/server` — vitest **9/9** (registry, HTTP MCP initialize/list/call, auth, exposure filter, confirmation hook)
+- Electron demo — **verified end-to-end in a real app**: launch → preload injection → 5 tools registered → `tools/call` over HTTP for imperative and declarative tools → also invoked through the CLI stdio shim
+- Tauri (Rust) / Wails (Go) — verified via `cargo check`/`go build` and their test suites (see each directory's README)
 
-## 참고: WebMCP 표준과의 관계
+## Relation to the WebMCP standard
 
-이 라이브러리는 [W3C WebMCP CG 드래프트](https://webmachinelearning.github.io/webmcp)([repo](https://github.com/webmachinelearning/webmcp), Chrome 149/Edge 150 오리진 트라이얼)의 페이지 측 API를 데스크톱 웹뷰로 가져오는 것입니다. 원조 PoC는 [jasonjmcghee/WebMCP](https://github.com/jasonjmcghee/WebMCP), 생태계는 [MCP-B](https://mcp-b.ai). 기술 리서치 전문은 [webmcp-research.md](webmcp-research.md).
+This library brings the page-side API of the [W3C WebMCP CG draft](https://webmachinelearning.github.io/webmcp/) ([repo](https://github.com/webmachinelearning/webmcp); origin trial in Chrome 149 / Edge 150) to desktop webviews. The original proof of concept is [jasonjmcghee/WebMCP](https://github.com/jasonjmcghee/WebMCP); MCP-B ([site](https://mcp-b.ai)) builds ecosystem tooling. The underlying technical research (Korean): [webmcp-research.md](webmcp-research.md).
 
-## 라이선스
+## License
 
 MIT
