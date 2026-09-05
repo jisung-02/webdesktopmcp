@@ -171,8 +171,14 @@ pnpm typecheck
 
 Consult [support and verification scope](docs/support.md), [security](docs/security.md), and the updated [research notes (Korean)](webmcp-research.md) before integrating the experimental bridge.
 
+## Contributing and support
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, and pull requests; [SUPPORT.md](.github/SUPPORT.md) for help; and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for participation guidelines. Report vulnerabilities using [SECURITY.md](SECURITY.md).
+
+Assistant guidance: [AGENTS.md](AGENTS.md) and [tool setup](docs/ai-assistants.md).
+
 ## License
 
-MIT
+[MIT](LICENSE). License copies are included in each distributable package.
 
 [References and implementation evidence](docs/references.md)

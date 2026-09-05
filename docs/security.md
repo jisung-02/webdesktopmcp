@@ -1,5 +1,7 @@
 # webdesktopmcp 보안 모델
 
+취약점 제보 절차는 루트 [SECURITY.md](../SECURITY.md)를 따릅니다. 이 문서는 구현의 기술적 보안 경계를 설명합니다.
+
 공식 출처와 구현·테스트별 적용 근거: [레퍼런스](references.md).
 
 검토일: 2026-09-05. 이 문서는 실험적 데스크톱 WebMCP-to-MCP 브리지의 보안 경계를 설명합니다. [WebMCP CG 초안](https://webmachinelearning.github.io/webmcp/)은 W3C 표준이나 표준화 트랙 문서가 아니며, 이 라이브러리가 브라우저의 보안 모델 전체를 구현한다는 의미가 아닙니다. 기능 범위는 [지원 표](support.md)를 기준으로 합니다.
