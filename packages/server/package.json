@@ -27,5 +27,14 @@
     "@types/node": "^24.5.2",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jisung-02/webdesktopmcp.git",
+    "directory": "packages/server"
+  },
+  "bugs": {
+    "url": "https://github.com/jisung-02/webdesktopmcp/issues"
+  },
+  "homepage": "https://github.com/jisung-02/webdesktopmcp#readme"
 }

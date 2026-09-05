@@ -1,0 +1,12 @@
+---
+description: Shared webdesktopmcp contribution and implementation instructions
+alwaysApply: true
+---
+
+# Repository rules
+
+Read and follow the root `AGENTS.md` before editing. It defines the shared implementation boundaries, validation commands, and branch/commit conventions.
+
+@AGENTS.md
+
+Keep substantive project rules in `AGENTS.md`. Do not create a parallel rule set here. Changes to the shared page implementation must regenerate the desktop bundles, and reviews must distinguish native browser support from polyfill and mock coverage.
