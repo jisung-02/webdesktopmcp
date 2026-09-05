@@ -115,6 +115,7 @@ fn mcp_tool(info: &RegisteredToolInfo) -> Value {
         tool["title"] = json!(title);
     }
     if let Some(annotations) = &declaration.annotations {
+        tool["_meta"]["webdesktopmcp/annotations"] = annotations.clone();
         let mut ann = json!({});
         if let Some(read_only) = annotations.get("readOnlyHint").and_then(|v| v.as_bool()) {
             ann["readOnlyHint"] = json!(read_only);
@@ -138,20 +139,6 @@ fn call_tool(core: &RpcCore, params: &Value) -> Value {
         return error_result("Tool name is required.");
     }
     let input = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-
-    // Exposure is enforced on calls, not just listings (parity with the TS
-    // reference server): exposed_to tools are reserved for in-page agents.
-    {
-        let reg = registry::lock(&core.registry);
-        if let Some(info) = reg.get(&name) {
-            if !info.exposed_to.is_empty() {
-                drop(reg);
-                return error_result(&format!(
-                    "Tool \"{name}\" is reserved for in-page agents (exposed_to) and is not callable by external clients."
-                ));
-            }
-        }
-    }
 
     let started = {
         let mut reg = registry::lock(&core.registry);
@@ -227,6 +214,19 @@ mod tests {
         let decl = crate::messages::validate_declaration(&tool).unwrap();
         registry::lock(&core.registry)
             .handle_register("main", "http://localhost:3000", decl, exposed_to);
+    }
+
+    #[test]
+    fn annotations_are_preserved_in_metadata() {
+        let (core, _, _) = setup();
+        let annotations = json!({"readOnlyHint": true, "security": {"requiresConfirmation": true}});
+        let declaration = crate::messages::validate_declaration(&json!({
+            "name": "annotated", "description": "test", "annotations": annotations
+        })).unwrap();
+        registry::lock(&core.registry).handle_register("main", "http://a", declaration, vec![]);
+        let response = handle_json_rpc(&core, &json!({"id": 1, "method": "tools/list"})).unwrap();
+        assert_eq!(response["result"]["tools"][0]["_meta"]["webdesktopmcp/annotations"], annotations);
+        assert_eq!(response["result"]["tools"][0]["annotations"], json!({"readOnlyHint": true}));
     }
 
     #[test]
@@ -349,6 +349,7 @@ mod tests {
         let invocation_id = message["invocationId"].as_str().unwrap().to_string();
 
         registry::lock(&registry).handle_execute_result(
+            "main",
             &invocation_id,
             true,
             Some("{\"hello\":\"world\"}"),
@@ -410,6 +411,7 @@ mod tests {
         assert_eq!(frame, "main");
         let invocation_id = message["invocationId"].as_str().unwrap().to_string();
         registry::lock(&registry).handle_execute_result(
+            "main",
             &invocation_id,
             false,
             None,

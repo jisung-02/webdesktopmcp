@@ -34,6 +34,7 @@ import {
 
 const SEND_CHANNEL = "webdesktopmcp:message";
 const RECV_CHANNEL = "webdesktopmcp:host-message";
+const CONFIG_CHANNEL = "webdesktopmcp:config";
 
 /** Chromium version whose WebMCP origin trial/flag the mirror targets. */
 export const NATIVE_MIN_CHROMIUM = 149;
@@ -90,11 +91,11 @@ export function installWebDesktopMcp(options: WebDesktopMcpOptions): WebDesktopM
       options.blinkFeatureName ?? "WebMCP",
     );
     log(
-      `Chromium ${process.versions.chrome} supports WebMCP — enabled natively via --enable-blink-features.`,
+      `Chromium ${process.versions.chrome} is eligible for WebMCP — requested Blink feature; renderer feature detection selects the mode.`,
     );
   } else {
     log(
-      `Chromium ${process.versions.chrome} has no native WebMCP (needs >= ${NATIVE_MIN_CHROMIUM}) — using the polyfill.`,
+      `Chromium ${process.versions.chrome} uses renderer feature detection (native preference: ${nativePreference}).`,
     );
   }
 
@@ -111,26 +112,36 @@ export function installWebDesktopMcp(options: WebDesktopMcpOptions): WebDesktopM
   };
   const registry = new ToolRegistry(adapter, { invocationTimeoutMs: 120_000 });
 
-  ipcMain.on(SEND_CHANNEL, (event, raw: RendererMessage) => {
+  const onConfig = (event: Electron.IpcMainEvent) => {
+    event.returnValue = { native: nativePreference === "off" ? "force-polyfill" : "auto" };
+  };
+  ipcMain.on(CONFIG_CHANNEL, onConfig);
+  const onMessage = (event: Electron.IpcMainEvent, raw: RendererMessage) => {
+    // This adapter identifies WebContents, not DOM subframes. Only its main
+    // document can own tools or send replies through the bridge.
+    if (!event.senderFrame || event.senderFrame !== event.sender.mainFrame) return;
+    if (!raw || typeof raw !== "object") return;
     const frameId = String(event.sender.id);
-    const origin = normalizeOrigin(event.senderFrame?.origin || event.sender.getURL());
+    const origin = normalizeOrigin(event.senderFrame.url || event.sender.getURL());
     switch (raw.kind) {
       case "register": {
-        const outcome = registry.handleRegister(frameId, raw.invocationId, raw.tool, raw.exposedTo);
-        if (outcome.ok) registry.setOrigin(raw.tool.name, origin);
+        registry.handleRegister(frameId, raw.invocationId, raw.tool, raw.exposedTo, origin);
         break;
       }
       case "unregister":
         registry.handleUnregister(frameId, raw.name);
         break;
       case "executeResult":
-        registry.handleExecuteResult(raw.invocationId, raw.ok, raw.result, raw.errorCode, raw.errorMessage);
+        registry.handleExecuteResult(frameId, raw.invocationId, raw.ok, raw.result, raw.errorCode, raw.errorMessage);
         break;
       case "executeForward":
-        registry.handleExecuteForward(frameId, raw.requestId, raw.name, raw.input, raw.fromOrigin);
+        registry.handleExecuteForward(frameId, raw.requestId, raw.name, raw.input, origin);
+        break;
+      case "cancelForward":
+        registry.handleCancelForward(frameId, raw.requestId);
         break;
       case "getToolsRequest":
-        registry.handleGetToolsRequest(frameId, raw.requestId, raw.forOrigin, raw.fromOrigins);
+        registry.handleGetToolsRequest(frameId, raw.requestId, origin, raw.fromOrigins);
         break;
       case "log":
         if (raw.level === "error") console.error(`[webdesktopmcp:frame] ${raw.message}`);
@@ -140,11 +151,13 @@ export function installWebDesktopMcp(options: WebDesktopMcpOptions): WebDesktopM
       default:
         break;
     }
-  });
+  };
+  ipcMain.on(SEND_CHANNEL, onMessage);
 
   // ---- Preload wiring ------------------------------------------------------
   const preloadPath = path.join(__dirname, "preload.cjs");
   const preloadedSessions = new WeakSet<Session>();
+  const trackedContents = new Map<string, Electron.WebContents>();
 
   const ensureSessionPreload = (session: Session): void => {
     if (preloadedSessions.has(session)) return;
@@ -174,6 +187,7 @@ export function installWebDesktopMcp(options: WebDesktopMcpOptions): WebDesktopM
 
   const onWebContentsCreated = (_event: unknown, wc: Electron.WebContents): void => {
     ensureSessionPreload(wc.session);
+    trackedContents.set(String(wc.id), wc);
     // A committed navigation replaces the document, and W3C tools are
     // per-document: drop the old document's tools. In-page (pushState)
     // navigations fire `did-navigate-in-page` instead, so SPA routes keep
@@ -183,10 +197,22 @@ export function installWebDesktopMcp(options: WebDesktopMcpOptions): WebDesktopM
       for (const cb of frameGoneCallbacks) cb(String(wc.id));
     });
     wc.once("destroyed", () => {
+      trackedContents.delete(String(wc.id));
       for (const cb of frameGoneCallbacks) cb(String(wc.id));
     });
   };
   app.on("web-contents-created", onWebContentsCreated);
+  const stopChanges = registry.onToolsChanged(() => {
+    for (const [frameId, wc] of trackedContents) {
+      if (wc.isDestroyed()) continue;
+      const origin = normalizeOrigin(wc.getURL());
+      adapter.sendToFrame(frameId, {
+        kind: "toolsChanged",
+        tools: registry.list().filter(t => t.frameId === frameId ||
+          (origin !== "null" && !!origin && (t.origin === origin || t.exposedTo?.includes(origin)))),
+      });
+    }
+  });
 
   // ---- Local MCP server ----------------------------------------------------
   const token = randomBytes(24).toString("base64url");
@@ -225,6 +251,12 @@ export function installWebDesktopMcp(options: WebDesktopMcpOptions): WebDesktopM
     registry,
     async dispose() {
       app.off("web-contents-created", onWebContentsCreated);
+      ipcMain.off(SEND_CHANNEL, onMessage);
+      ipcMain.off(CONFIG_CHANNEL, onConfig);
+      stopChanges();
+      for (const frameId of trackedContents.keys()) registry.removeFrame(frameId);
+      trackedContents.clear();
+      await ready.catch(() => {});
       await removeAppEntry(options.appName).catch(() => {});
       await readyRef?.close().catch(() => {});
     },

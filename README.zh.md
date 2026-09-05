@@ -1,13 +1,13 @@
 # webdesktopmcp
 
-**把桌面应用(Electron · Tauri · Wails)变成 WebMCP 服务器。**
+**面向 Electron · Tauri · Wails 的实验性桌面 WebMCP-to-MCP 桥接库**
 
-[English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | 中文 | [Français](README.fr.md) | [Español](README.es.md)
+[English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [中文](README.zh.md) | [Français](README.fr.md) | [Español](README.es.md)
 
-只需几行代码，桌面应用的功能就能作为**工具暴露给 AI 代理**(Claude Desktop、Claude Code、Cursor、ChatGPT Desktop 等)。页面代码直接使用 [W3C WebMCP 草案](https://webmachinelearning.github.io/webmcp/)的标准 API(`document.modelContext`);当运行时提供原生 API 时会自动切换到真正的原生实现。
+通过本地 MCP 服务器和 CLI stdio 连接向外部代理提供页面函数。[2026-09-04 WebMCP CG 草案](https://webmachinelearning.github.io/webmcp/)既不是 W3C 标准，也不属于 W3C Standards Track。本库不声称完全符合草案。
 
 ```ts
-// 应用代码 — 直接使用 W3C WebMCP 标准 API
+// Experimental WebMCP draft API
 document.modelContext.registerTool({
   name: "search-orders",
   description: "按订单号或客户名搜索订单",
@@ -27,26 +27,13 @@ document.modelContext.registerTool({
     "command": "npx", "args": ["-y", "@webdesktopmcp/cli", "connect", "--app", "MyApp"] } } }
 ```
 
-## 工作原理
+## 支持范围 · 2026-09-05
 
-桌面 webview 还没有原生 WebMCP API(Electron 的 Chromium 低于 149;Tauri 使用 WKWebView/WebView2),因此本库桥接了三层:
+原生模式通过运行时检测 `document.modelContext` 所需方法来选择。版本号或功能开关不能保证可用性。[Electron 44 已包含 Chromium 152](https://www.electronjs.org/blog/electron-44-0)，[Chrome origin trial 从 149 开始](https://developer.chrome.com/docs/ai/webmcp)。
 
-```
-[webview 中的页面]
-  document.modelContext.registerTool(...)     ← polyfill 或原生镜像(同一 API)
-        │  IPC — docs/protocol.md 线协议
-        ▼
-[原生宿主]  Electron main / Tauri(Rust) / Wails(Go)
-  工具注册表 + 本地 MCP 服务器 (127.0.0.1,Bearer 令牌)
-        │
-        ├─ Streamable HTTP  ← Cursor、Claude Code 等直接连接
-        └─ @webdesktopmcp/cli (stdio 垫片) ← Claude Desktop 等
-```
+三个适配器的 polyfill 模式共享实现，并支持声明式表单的子集。原生模式仅镜像安装后命令式的 `registerTool` 调用，不向外部 MCP 镜像原生声明式表单。两种模式并非完全相同。
 
-**原生优先的版本门控** — Electron 适配器会检查 `process.versions.chrome`:
-
-- **Chromium ≥ 149** → 通过 `--enable-blink-features=WebMCP` 开关启用原生 WebMCP。页面使用**真正的原生 `document.modelContext`**;适配器只透明地包装 `registerTool`,把注册镜像到外部代理(浏览器内置代理仍走原生路径)。
-- **低于 149**(目前所有版本)→ 注入实现 W3C 语义的 polyfill。切换完全自动,无需修改应用代码。
+本库不完整实现浏览器 iframe/Permissions Policy，也不禁止无头执行。工具参数没有 JSON Schema 运行时验证，请在工具中验证。非空 `exposedTo` 会阻止外部发现和调用，这是本库的策略。
 
 ## 包
 
@@ -55,7 +42,7 @@ document.modelContext.registerTool({
 | [`@webdesktopmcp/protocol`](packages/protocol) | TS | TS/Rust/Go 宿主共享的线协议([规范](docs/protocol.md)) |
 | [`@webdesktopmcp/core`](packages/core) | TS | `document.modelContext` polyfill + 原生镜像 + 声明式表单 API |
 | [`@webdesktopmcp/server`](packages/server) | TS | 框架无关的本地 MCP 服务器 + 应用注册表 |
-| [`@webdesktopmcp/electron`](packages/electron) | TS | Electron 适配器(preload 自动注入、版本门控、确认对话框钩子) |
+| [`@webdesktopmcp/electron`](packages/electron) | TS | Electron 适配器(preload 自动注入、功能检测、确认对话框钩子) |
 | [`@webdesktopmcp/cli`](packages/cli) | TS | `webdesktopmcp connect --app <名称>` stdio 垫片 |
 | `crates/tauri-plugin-webdesktopmcp` | Rust | Tauri v2 插件 |
 | `go/webdesktopmcp` | Go | Wails v2 包 |
@@ -81,9 +68,10 @@ const win = new BrowserWindow({
 });
 ```
 
-渲染进程里直接使用上面的标准 `document.modelContext.registerTool` 代码即可。需要类型推断时可用 `@webdesktopmcp/core` 的 `defineTool` 辅助函数（`execute` 内会推断输入类型）。调试时可在 DevTools 控制台调用 `window.__webDesktopMcp.listTools()` 查看页面注册的工具。还支持**声明式表单 API** — 无需一行 JavaScript,表单即是工具:
+渲染进程里直接使用上面的草案 API `document.modelContext.registerTool` 代码即可。需要类型推断时可用 `@webdesktopmcp/core` 的 `defineTool` 辅助函数（`execute` 内会推断输入类型）。调试时可在 DevTools 控制台调用 `window.__webDesktopMcp.listTools()` 查看页面注册的工具。还支持**声明式表单 API** — 无需一行 JavaScript,表单即是工具:
 
 ```html
+<!-- Polyfill mode: native declarative forms are not mirrored externally. -->
 <form toolname="order-coffee"
       tooldescription="订购咖啡。接受饮品类型和浓缩份数,返回订单号。"
       toolautosubmit>
@@ -146,19 +134,26 @@ pnpm --filter webdesktopmcp-electron-demo start
 node packages/cli/dist/cli.js list
 ```
 
-演示应用(`examples/electron-demo`)暴露 4 个命令式工具 + 1 个声明式表单工具(`order-coffee`)。在 Claude Desktop 里试试 *"显示未完成的任务"* 或 *"点一杯双份浓缩的拿铁"*。
+Polyfill 模式示例：演示应用(`examples/electron-demo`)暴露 4 个命令式工具 + 1 个声明式表单工具(`order-coffee`)。在 Claude Desktop 里试试 *"显示未完成的任务"* 或 *"点一杯双份浓缩的拿铁"*。
 
 ## 验证状态
 
-- `@webdesktopmcp/core` — vitest **19/19**(polyfill 语义、声明式表单、原生镜像)
-- `@webdesktopmcp/server` — vitest **9/9**(注册表、HTTP MCP initialize/list/call、认证、暴露过滤、确认钩子)
-- Electron 演示 — **真实应用 E2E 验证**:启动 → preload 注入 → 注册 5 个工具 → 通过 HTTP `tools/call` 调用命令式与声明式工具 → 并经 CLI stdio 垫片调用确认
-- Tauri (Rust) / Wails (Go) — 通过 `cargo check`/`go build` 及各自测试套件验证(见各目录 README)
+安装、Tauri/Wails 配置和 CLI 用法见[英文指南](README.md)。功能与验证范围以[支持矩阵](docs/support.md)为准，信任边界见[安全文档](docs/security.md)。本地自动测试不等同于官方 WPT 符合性测试或所有平台的原生 GUI 验证。
 
-## 与 WebMCP 标准的关系
+```bash
+pnpm build
+pnpm test
+pnpm typecheck
+```
 
-本库把 [W3C WebMCP CG 草案](https://webmachinelearning.github.io/webmcp)([repo](https://github.com/webmachinelearning/webmcp);Chrome 149 / Edge 150 起源试验)的页面端 API 带入桌面 webview。最早的 PoC 是 [jasonjmcghee/WebMCP](https://github.com/jasonjmcghee/WebMCP),生态工具见 [MCP-B](https://mcp-b.ai)。技术研究全文(韩语):[webmcp-research.md](webmcp-research.md)。
+## 与 WebMCP 草案的关系
+
+通过本地 MCP 服务器和 CLI stdio 连接向外部代理提供页面函数。[2026-09-04 WebMCP CG 草案](https://webmachinelearning.github.io/webmcp/)既不是 W3C 标准，也不属于 W3C Standards Track。本库不声称完全符合草案。
+
+[Support and verification](docs/support.md) · [Research notes](webmcp-research.md)
 
 ## 许可证
 
 MIT
+
+[References and implementation evidence](docs/references.md)

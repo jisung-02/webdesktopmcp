@@ -45,7 +45,7 @@ func TestExecuteForwardNotFound(t *testing.T) {
 	}
 }
 
-func TestExecuteForwardSameFrameRejected(t *testing.T) {
+func TestExecuteForwardSameFrameAllowed(t *testing.T) {
 	env := newTestServer(t)
 	mustRegister(t, env, "frameA", "mine", nil)
 
@@ -54,15 +54,17 @@ func TestExecuteForwardSameFrameRejected(t *testing.T) {
 		"input": map[string]any{}, "fromOrigin": "http://any",
 	})
 	res := env.rec.waitFor(t, 2*time.Second, func(m map[string]any) bool {
-		return m["kind"] == "executeForwardResult" && m["requestId"] == "ex-3"
+		return m["kind"] == "execute" && m["name"] == "mine"
 	})
-	if res["errorCode"] != "InvalidStateError" {
+	if res["name"] != "mine" {
 		t.Fatalf("result = %v", res)
 	}
 }
 
 func TestExecuteForwardSuccessRoundTrip(t *testing.T) {
 	env := newTestServer(t)
+	env.s.SetFrameOrigin("frameA", "http://app")
+	env.s.SetFrameOrigin("frameB", "http://app")
 	mustRegister(t, env, "frameA", "shared_helper", nil)
 
 	go func() {
@@ -90,6 +92,8 @@ func TestExecuteForwardSuccessRoundTrip(t *testing.T) {
 
 func TestExecuteForwardTimeout(t *testing.T) {
 	env := newTestServer(t)
+	env.s.SetFrameOrigin("frameA", "http://app")
+	env.s.SetFrameOrigin("frameB", "http://app")
 	mustRegister(t, env, "frameA", "slow_owner", nil)
 	env.s.reg.setTimeout(80 * time.Millisecond)
 
@@ -102,6 +106,12 @@ func TestExecuteForwardTimeout(t *testing.T) {
 	})
 	if res["ok"] != false || res["errorCode"] != "TimeoutError" {
 		t.Fatalf("result = %v", res)
+	}
+	env.rec.waitFor(t, time.Second, func(m map[string]any) bool { return m["kind"] == "abort" && m["_frameId"] == "frameA" })
+	env.s.reg.mu.Lock()
+	defer env.s.reg.mu.Unlock()
+	if len(env.s.reg.forwards) != 0 {
+		t.Fatal("timed out forward leaked")
 	}
 }
 
@@ -120,9 +130,9 @@ func TestGetToolsRequestAggregation(t *testing.T) {
 	mustRegister(t, env, "frameB", "tool_b_open", nil)
 
 	// Caller frameB, forOrigin http://b.origin:
-	// - own tools always visible (tool_b_open)
-	// - tool_a_restricted exposed to http://b.origin → visible
-	// - tool_a_open has no exposedTo → visible to everyone
+	// - own tools visible (tool_b_open)
+	// - tool_a_restricted requires explicit fromOrigins despite exposure
+	// - tool_a_open has no exposedTo → hidden from other origins
 	env.s.Send("frameB", map[string]any{
 		"kind": "getToolsRequest", "requestId": "gt-1", "forOrigin": "http://b.origin",
 	})
@@ -130,7 +140,7 @@ func TestGetToolsRequestAggregation(t *testing.T) {
 		return m["kind"] == "getToolsResponse" && m["requestId"] == "gt-1"
 	})
 	names := toolNames(res["tools"])
-	want := map[string]bool{"tool_a_open": true, "tool_a_restricted": true, "tool_b_open": true}
+	want := map[string]bool{"tool_b_open": true}
 	if len(names) != len(want) {
 		t.Fatalf("names = %v", names)
 	}
@@ -140,8 +150,8 @@ func TestGetToolsRequestAggregation(t *testing.T) {
 		}
 	}
 
-	// fromOrigins filter: caller frameC owns nothing, so only tools whose
-	// origin is http://a.origin pass (tool_b_open is dropped).
+	env.s.SetFrameOrigin("frameC", "http://b.origin")
+	// fromOrigins adds the exposed foreign tool; same-origin tools remain.
 	env.s.Send("frameC", map[string]any{
 		"kind": "getToolsRequest", "requestId": "gt-2", "forOrigin": "http://b.origin",
 		"fromOrigins": []string{"http://a.origin"},
@@ -150,10 +160,11 @@ func TestGetToolsRequestAggregation(t *testing.T) {
 		return m["kind"] == "getToolsResponse" && m["requestId"] == "gt-2"
 	})
 	names = toolNames(res["tools"])
-	if len(names) != 2 || !names["tool_a_open"] || !names["tool_a_restricted"] {
+	if len(names) != 2 || !names["tool_a_restricted"] || !names["tool_b_open"] {
 		t.Fatalf("filtered names = %v", names)
 	}
 
+	env.s.SetFrameOrigin("frameC", "http://other.origin")
 	// Restricted tool not exposed to the caller's origin is hidden.
 	env.s.Send("frameC", map[string]any{
 		"kind": "getToolsRequest", "requestId": "gt-3", "forOrigin": "http://other.origin",
@@ -165,7 +176,7 @@ func TestGetToolsRequestAggregation(t *testing.T) {
 	if names["tool_a_restricted"] {
 		t.Fatalf("restricted tool leaked: %v", names)
 	}
-	if !names["tool_a_open"] || !names["tool_b_open"] {
+	if len(names) != 0 {
 		t.Fatalf("open tools missing: %v", names)
 	}
 }
@@ -260,16 +271,17 @@ func TestNoSessionSameFrameReRegisterRefreshes(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Origin stamping from the `_origin` message field
+// Host provenance takes precedence over renderer origin claims
 // ---------------------------------------------------------------------------
 
-func TestRegisterOriginField(t *testing.T) {
+func TestRegisterCannotOverwriteHostOrigin(t *testing.T) {
 	env := newTestServer(t)
+	env.s.SetFrameOrigin("frameA", "http://trusted")
 	mustRegister(t, env, "frameA", "originated", func(msg map[string]any) {
 		msg["_origin"] = "tauri://localhost"
 	})
 	tools := env.s.reg.list()
-	if len(tools) != 1 || tools[0].origin != "tauri://localhost" {
+	if len(tools) != 1 || tools[0].origin != "http://trusted" {
 		t.Fatalf("origin = %+v", tools)
 	}
 }
@@ -280,11 +292,150 @@ func TestRegisterOriginField(t *testing.T) {
 
 func TestLateExecuteResultIgnored(t *testing.T) {
 	env := newTestServer(t)
-	env.s.reg.handleExecuteResult("inv-never-issued", true, "1", "", "")
-	env.s.reg.handleExecuteResult("", true, "1", "", "")
+	env.s.reg.handleExecuteResult("a", "inv-never-issued", true, "1", "", "")
+	env.s.reg.handleExecuteResult("a", "", true, "1", "", "")
 	// No reply messages may appear for unknown invocations.
 	time.Sleep(20 * time.Millisecond)
 	if n := len(env.rec.snapshot()); n != 0 {
 		t.Fatalf("unexpected messages: %v", env.rec.snapshot())
 	}
+}
+
+func TestCallerOriginCannotBeForged(t *testing.T) {
+	env := newTestServer(t)
+	env.s.SetFrameOrigin("owner", "http://owner")
+	env.s.SetFrameOrigin("caller", "http://evil")
+	mustRegister(t, env, "owner", "secret", func(m map[string]any) { m["exposedTo"] = []string{"http://trusted"} })
+	env.s.Send("caller", map[string]any{"kind": "executeForward", "requestId": "forge", "name": "secret", "fromOrigin": "http://trusted"})
+	if res := env.rec.snapshot()[1]; res["errorCode"] != "SecurityError" {
+		t.Fatalf("forged origin accepted: %v", res)
+	}
+	env.s.Send("caller", map[string]any{"kind": "getToolsRequest", "requestId": "list", "forOrigin": "http://trusted"})
+	if names := toolNames(env.rec.snapshot()[2]["tools"]); len(names) != 0 {
+		t.Fatalf("forged list: %v", names)
+	}
+}
+
+func TestOwnToolsRemainWithAdditionalOrigins(t *testing.T) {
+	env := newTestServer(t)
+	env.s.SetFrameOrigin("a", "http://a")
+	mustRegister(t, env, "a", "own", nil)
+	env.s.Send("a", map[string]any{"kind": "getToolsRequest", "requestId": "q", "fromOrigins": []string{"http://other"}})
+	if names := toolNames(env.rec.snapshot()[1]["tools"]); len(names) != 1 || !names["own"] {
+		t.Fatalf("same-origin tool missing: %v", names)
+	}
+}
+
+func TestForwardCancelAndResultOwnership(t *testing.T) {
+	env := newTestServer(t)
+	env.s.SetFrameOrigin("owner", "http://app")
+	env.s.SetFrameOrigin("caller", "http://app")
+	mustRegister(t, env, "owner", "work", nil)
+	env.s.Send("caller", map[string]any{"kind": "executeForward", "requestId": "q", "name": "work"})
+	execute := env.rec.snapshot()[1]
+	env.s.Send("intruder", map[string]any{"kind": "executeResult", "invocationId": execute["invocationId"], "ok": true, "result": "1"})
+	if len(env.rec.snapshot()) != 2 {
+		t.Fatal("non-owner completed invocation")
+	}
+	env.s.Send("intruder", map[string]any{"kind": "cancelForward", "requestId": "q"})
+	if len(env.s.reg.forwards) != 1 {
+		t.Fatal("other caller cancelled invocation")
+	}
+	if ack := env.s.Send("caller", map[string]any{"kind": "cancelForward", "requestId": "q"}); ack["ok"] != true {
+		t.Fatalf("cancel rejected: %v", ack)
+	}
+	if len(env.s.reg.forwards) != 0 {
+		t.Fatal("cancel did not clean pending")
+	}
+	if m := env.rec.snapshot()[2]; m["kind"] != "abort" || m["invocationId"] != execute["invocationId"] {
+		t.Fatalf("missing abort: %v", m)
+	}
+}
+
+func TestInvokePreCancelledDoesNotDispatch(t *testing.T) {
+	env := newTestServer(t)
+	mustRegister(t, env, "a", "work", nil)
+	done := make(chan struct{})
+	close(done)
+	if _, err := env.s.reg.invoke("work", nil, done); err == nil {
+		t.Fatal("expected cancellation")
+	}
+	if len(env.rec.snapshot()) != 1 {
+		t.Fatal("cancelled invocation dispatched")
+	}
+}
+
+func TestInvocationOwnerGoneAndTimeoutAbort(t *testing.T) {
+	for _, action := range []string{"gone", "timeout"} {
+		t.Run(action, func(t *testing.T) {
+			env := newTestServer(t)
+			mustRegister(t, env, "owner", "work", nil)
+			env.s.reg.setTimeout(20 * time.Millisecond)
+			finished := make(chan error, 1)
+			go func() { _, err := env.s.reg.invoke("work", nil, nil); finished <- err }()
+			execute := env.rec.waitFor(t, time.Second, func(m map[string]any) bool { return m["kind"] == "execute" })
+			env.s.Send("intruder", map[string]any{"kind": "executeResult", "invocationId": execute["invocationId"], "ok": true, "result": "1"})
+			if action == "gone" {
+				env.s.FrameGone("owner")
+			}
+			select {
+			case err := <-finished:
+				if err == nil {
+					t.Fatal("non-owner completed call")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("call not released")
+			}
+			env.s.reg.mu.Lock()
+			n := len(env.s.reg.pending)
+			env.s.reg.mu.Unlock()
+			if n != 0 {
+				t.Fatal("pending call leaked")
+			}
+			if action == "timeout" {
+				env.rec.waitFor(t, time.Second, func(m map[string]any) bool {
+					return m["kind"] == "abort" && m["invocationId"] == execute["invocationId"]
+				})
+			}
+		})
+	}
+}
+
+func TestForwardFrameGoneCleansPending(t *testing.T) {
+	for _, frame := range []string{"caller", "owner"} {
+		t.Run(frame, func(t *testing.T) {
+			env := newTestServer(t)
+			env.s.SetFrameOrigin("owner", "http://app")
+			env.s.SetFrameOrigin("caller", "http://app")
+			mustRegister(t, env, "owner", "work", nil)
+			env.s.Send("caller", map[string]any{"kind": "executeForward", "requestId": "q", "name": "work"})
+			env.s.FrameGone(frame)
+			if len(env.s.reg.forwards) != 0 {
+				t.Fatal("forward leaked")
+			}
+			m := env.rec.snapshot()[2]
+			if frame == "caller" && m["kind"] != "abort" {
+				t.Fatalf("missing owner abort: %v", m)
+			}
+			if frame == "owner" && (m["kind"] != "executeForwardResult" || m["ok"] != false) {
+				t.Fatalf("missing caller failure: %v", m)
+			}
+		})
+	}
+}
+
+func TestSameOriginRestrictedToolsRemainAccessible(t *testing.T) {
+	env := newTestServer(t)
+	env.s.SetFrameOrigin("owner", "http://app")
+	env.s.SetFrameOrigin("caller", "http://app")
+	mustRegister(t, env, "owner", "work", func(m map[string]any) { m["exposedTo"] = []string{"http://other"} })
+	env.s.Send("caller", map[string]any{"kind": "getToolsRequest", "requestId": "q"})
+	if !toolNames(env.rec.snapshot()[1]["tools"])["work"] {
+		t.Fatal("same-origin tool hidden")
+	}
+	env.s.Send("caller", map[string]any{"kind": "executeForward", "requestId": "f", "name": "work"})
+	if m := env.rec.snapshot()[2]; m["kind"] != "execute" || m["_frameId"] != "owner" {
+		t.Fatalf("not routed to owner: %v", m)
+	}
+	env.s.Send("caller", map[string]any{"kind": "cancelForward", "requestId": "f"})
 }

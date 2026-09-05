@@ -48,8 +48,10 @@ function randomId(prefix: string): string {
 /** Declared + internal bookkeeping for a tool registered from this document. */
 interface LocalTool {
   declaration: ModelContextTool;
+  registrationId: string;
   exposedTo?: string[];
   declarative?: boolean;
+  cleanup?: () => void;
 }
 
 export class ModelContext extends EventTarget {
@@ -91,50 +93,30 @@ export class ModelContext extends EventTarget {
         `A tool named "${tool.name}" is already registered in this document.`,
       );
     }
+    if (options.signal?.aborted) throw abortError();
     const exposedTo = options.exposedTo?.map((o) => String(o));
+    const invocationId = randomId("reg");
     const entry: LocalTool = {
+      registrationId: invocationId,
       declaration: tool,
       exposedTo: exposedTo && exposedTo.length > 0 ? exposedTo : undefined,
     };
-
-    const invocationId = randomId("reg");
-    let settled = false;
     const promise = new Promise<undefined>((resolve, reject) => {
-      this.#registerPending.set(invocationId, {
-        toolName: tool.name,
-        resolve: (v) => {
-          settled = true;
-          resolve(v);
-        },
-        reject: (r) => {
-          settled = true;
-          reject(r);
-        },
-      });
+      this.#registerPending.set(invocationId, { toolName: tool.name, resolve, reject });
     });
-
-    let onAbort: (() => void) | null = null;
     if (options.signal) {
       const signal = options.signal;
-      if (signal.aborted) return Promise.reject(abortError());
-      onAbort = () => {
-        if (!settled) {
-          // Still in flight: fail the promise and roll back what the host may keep.
-          const pending = this.#registerPending.get(invocationId);
-          if (pending) {
-            this.#registerPending.delete(invocationId);
-            pending.reject(abortError());
-          }
-          this.#forgetLocal(tool.name);
-        } else if (this.#localTools.has(tool.name)) {
-          // Spec: aborting the signal after registration unregisters the tool.
+      const onAbort = () => {
+        const pending = this.#registerPending.get(invocationId);
+        this.#registerPending.delete(invocationId);
+        pending?.reject(abortError());
+        if (this.#localTools.get(tool.name) === entry) {
           this.#forgetLocal(tool.name);
           this.#bridge.send({ kind: "unregister", invocationId: randomId("unreg"), name: tool.name });
         }
       };
-      // Intentionally NOT removed on settlement: per the spec the signal owns
-      // the tool's whole lifetime, so a later abort must unregister it.
       signal.addEventListener("abort", onAbort, { once: true });
+      entry.cleanup = () => signal.removeEventListener("abort", onAbort);
     }
 
     this.#localTools.set(tool.name, entry);
@@ -155,6 +137,7 @@ export class ModelContext extends EventTarget {
 
   async getTools(options: ModelContextGetToolOptions = {}): Promise<PublicRegisteredTool[]> {
     this.#assertAlive();
+    if (options.signal?.aborted) throw abortError();
     const requestId = randomId("gt");
     const promise = new Promise<PublicRegisteredTool[]>((resolve, reject) => {
       let onAbort: (() => void) | null = null;
@@ -194,6 +177,7 @@ export class ModelContext extends EventTarget {
     options: ModelContextExecuteToolOptions = {},
   ): Promise<string> {
     this.#assertAlive();
+    if (options.signal?.aborted) throw abortError();
     const requestId = randomId("ex");
     const promise = new Promise<string>((resolve, reject) => {
       let onAbort: (() => void) | null = null;
@@ -204,6 +188,7 @@ export class ModelContext extends EventTarget {
         }
         onAbort = () => {
           this.#executeForwardPending.delete(requestId);
+          this.#bridge.send({ kind: "cancelForward", requestId });
           reject(abortError());
         };
         options.signal.addEventListener("abort", onAbort, { once: true });
@@ -303,11 +288,19 @@ export class ModelContext extends EventTarget {
 
   /** @internal */
   dispose(): void {
+    if (this.#disposed) return;
     this.#disposed = true;
+    for (const name of [...this.#localTools.keys()]) {
+      this.#forgetLocal(name);
+      this.#bridge.send({ kind: "unregister", invocationId: randomId("unreg"), name });
+    }
+    for (const requestId of this.#executeForwardPending.keys()) {
+      this.#bridge.send({ kind: "cancelForward", requestId });
+    }
     this.#unsub();
     for (const p of this.#registerPending.values()) p.reject(abortError());
-    for (const p of this.#getToolsPending.values()) p.reject(abortError());
-    for (const p of this.#executeForwardPending.values()) p.reject(abortError());
+    for (const p of this.#getToolsPending.values()) { p.cleanup?.(); p.reject(abortError()); }
+    for (const p of this.#executeForwardPending.values()) { p.cleanup?.(); p.reject(abortError()); }
     this.#registerPending.clear();
     this.#getToolsPending.clear();
     this.#executeForwardPending.clear();
@@ -333,6 +326,13 @@ export class ModelContext extends EventTarget {
   }
 
   #forgetLocal(name: string): void {
+    const entry = this.#localTools.get(name);
+    entry?.cleanup?.();
+    if (entry) {
+      const pending = this.#registerPending.get(entry.registrationId);
+      this.#registerPending.delete(entry.registrationId);
+      pending?.reject(abortError());
+    }
     if (this.#localTools.delete(name)) {
       this.dispatchEvent(new Event("toolchange"));
     }
@@ -345,6 +345,7 @@ export class ModelContext extends EventTarget {
         if (!pending) return;
         this.#registerPending.delete(msg.invocationId as string);
         if (msg.ok) {
+          this.dispatchEvent(new Event("toolchange"));
           pending.resolve(undefined);
         } else {
           // Cross-frame name clash or host rejection: roll back the optimistic entry.
@@ -436,6 +437,7 @@ export function installModelContextPolyfill(
     return null;
   }
 
+  const original = Object.getOwnPropertyDescriptor(doc, "modelContext");
   const mc = new ModelContext(options.bridge, options.frameId, log);
   Object.defineProperty(doc, "modelContext", {
     value: mc,
@@ -468,11 +470,15 @@ export function installModelContextPolyfill(
   const declarativeDispose =
     options.declarative !== false ? setupDeclarativeApi(mc, log) : undefined;
 
+  let disposed = false;
   return {
     dispose() {
+      if (disposed) return;
+      disposed = true;
       declarativeDispose?.();
       mc.dispose();
-      delete (doc as unknown as Record<string, unknown>).modelContext;
+      if (original) Object.defineProperty(doc, "modelContext", original);
+      else delete (doc as unknown as Record<string, unknown>).modelContext;
       delete (globalThis as unknown as Record<string, unknown>).__webDesktopMcp;
     },
     get registeredToolNames() {

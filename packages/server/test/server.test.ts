@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { startLocalMcpServer, ToolRegistry, type HostAdapter } from "../src/index.js";
+import { isExposedTo } from "../src/registry.js";
 import type { HostMessage, RendererMessage } from "@webdesktopmcp/protocol";
 
 /** Captures messages per frame; tests reply to executions like a webview would. */
@@ -27,6 +28,7 @@ class MockAdapter implements HostAdapter {
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i]!.kind === "execute") {
         registry.handleExecuteResult(
+          frameId,
           (messages[i] as { invocationId: string }).invocationId,
           true,
           JSON.stringify(result),
@@ -129,13 +131,14 @@ describe("ToolRegistry", () => {
 
   it("routes executeForward to the owner and returns executeForwardResult to the caller", async () => {
     registry.handleRegister("frame-1", "reg-1", TEST_TOOL);
+    registry.setOrigin(TEST_TOOL.name, "https://caller.example");
     registry.handleExecuteForward("frame-2", "req-7", "search-cars", { make: "BMW" }, "https://caller.example");
 
     const forwarded = adapter.frames.get("frame-1")?.find((m) => m.kind === "execute") as
       | { invocationId: string; name: string }
       | undefined;
     expect(forwarded).toBeDefined();
-    registry.handleExecuteResult(forwarded!.invocationId, true, '{"ok":1}');
+    registry.handleExecuteResult("frame-1", forwarded!.invocationId, true, '{"ok":1}');
 
     const reply = adapter.frames.get("frame-2")?.find((m) => m.kind === "executeForwardResult") as
       | { requestId: string; ok: boolean; result?: string }
@@ -277,3 +280,114 @@ describe("local MCP server (HTTP)", () => {
 });
 
 import { vi } from "vitest";
+
+
+describe("origin and invocation regression guards", () => {
+  it("defaults to same-origin and keeps owner origin accessible with exposedTo", () => {
+    const tool = { ...TEST_TOOL, frameId: "owner", origin: "https://owner.example" };
+    expect(isExposedTo(tool, "https://foreign.example")).toBe(false);
+    expect(isExposedTo({ ...tool, exposedTo: ["https://partner.example"] }, tool.origin)).toBe(true);
+    expect(isExposedTo({ ...tool, exposedTo: ["https://partner.example"] }, "https://partner.example")).toBe(true);
+  });
+
+  it("executes a tool in the caller's own frame", () => {
+    registry.handleRegister("owner", "reg", TEST_TOOL);
+    registry.handleExecuteForward("owner", "own-call", TEST_TOOL.name, {}, "https://owner.example");
+    expect(adapter.frames.get("owner")!.find(m => m.kind === "execute")).toBeDefined();
+    adapter.replyExecute("owner", { ok: true });
+    expect(adapter.frames.get("owner")!.at(-1)).toMatchObject({ kind: "executeForwardResult", ok: true });
+  });
+
+  it("keeps own tools when fromOrigins requests additional origins", () => {
+    registry.handleRegister("owner", "reg", TEST_TOOL);
+    registry.setOrigin(TEST_TOOL.name, "https://owner.example");
+    registry.handleGetToolsRequest("owner", "list", "https://owner.example", ["https://other.example"]);
+    expect(adapter.frames.get("owner")!.at(-1)).toMatchObject({ tools: [{ name: TEST_TOOL.name }] });
+  });
+
+  it("does not execute when invocation signal is already aborted", async () => {
+    registry.handleRegister("owner", "reg", TEST_TOOL);
+    const controller = new AbortController(); controller.abort();
+    const result = registry.invoke(TEST_TOOL.name, {}, controller.signal);
+    const rejected = expect(result).rejects.toThrow();
+    const dispatched = adapter.frames.get("owner")!.some(m => m.kind === "execute");
+    if (dispatched) adapter.replyExecute("owner", null);
+    await rejected;
+    expect(dispatched).toBe(false);
+  });
+
+  it("aborts forwarded work only for its caller on cancellation", () => {
+    registry.handleRegister("owner", "reg", TEST_TOOL, ["https://caller.example"]);
+    registry.handleExecuteForward("caller", "call", TEST_TOOL.name, {}, "https://caller.example");
+    registry.handleCancelForward("stranger", "call");
+    expect(adapter.frames.get("owner")!.some(m => m.kind === "abort")).toBe(false);
+    registry.handleCancelForward("caller", "call");
+    expect(adapter.frames.get("owner")!.at(-1)).toMatchObject({ kind: "abort" });
+    expect(adapter.frames.get("caller")!.at(-1)).toMatchObject({ ok: false, errorCode: "AbortError" });
+  });
+
+  it("rejects pending work promptly when its owner disappears", async () => {
+    registry.handleRegister("owner", "reg", TEST_TOOL);
+    const pending = registry.invoke(TEST_TOOL.name, {}, new AbortController().signal);
+    const rejected = expect(pending).rejects.toThrow(/frame|document/i);
+    adapter.simulateFrameGone("owner");
+    await rejected;
+  });
+});
+
+
+describe("HTTP cancellation and registration races", () => {
+  it("aborts the webview invocation when its HTTP caller disconnects", async () => {
+    const server = await startLocalMcpServer({ appName: "Demo", appVersion: "1", registry });
+    closeServer = server.close;
+    registry.handleRegister("owner", "reg", TEST_TOOL);
+    const controller = new AbortController();
+    const call = fetch(server.url, {
+      method: "POST", signal: controller.signal,
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${server.token}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: TEST_TOOL.name, arguments: {} } }),
+    }).catch(() => undefined);
+    await vi.waitFor(() => expect(adapter.frames.get("owner")?.some(m => m.kind === "execute")).toBe(true));
+    controller.abort();
+    await call;
+    await vi.waitFor(() => expect(adapter.frames.get("owner")?.some(m => m.kind === "abort")).toBe(true));
+  });
+
+  it("rechecks exposure after confirmation and does not execute a replacement", async () => {
+    registry.handleRegister("owner", "reg", TEST_TOOL);
+    const server = await startLocalMcpServer({ appName: "Demo", appVersion: "1", registry,
+      confirmToolCall: () => { registry.handleRegister("owner", "replace", TEST_TOOL, ["https://private.example"]); return true; },
+    });
+    closeServer = server.close;
+    const response = await rpc(server.url, server.token, { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: TEST_TOOL.name } });
+    expect(response.json.result.isError).toBe(true);
+    expect(adapter.frames.get("owner")?.some(m => m.kind === "execute")).toBe(false);
+  });
+
+  it("preserves consequential and untrusted annotations in external metadata", async () => {
+    registry.handleRegister("owner", "reg", { ...TEST_TOOL, annotations: { consequentialHint: true, untrustedContentHint: true } });
+    const server = await startLocalMcpServer({ appName: "Demo", appVersion: "1", registry });
+    closeServer = server.close;
+    const response = await rpc(server.url, server.token, { jsonrpc: "2.0", id: 3, method: "tools/list" });
+    expect(response.json.result.tools[0]._meta["webdesktopmcp/annotations"]).toEqual({ consequentialHint: true, untrustedContentHint: true });
+  });
+
+  it("ignores execution results from a different frame", async () => {
+    registry.handleRegister("owner", "reg", TEST_TOOL);
+    const p = registry.invoke(TEST_TOOL.name, {}, new AbortController().signal);
+    const execute = adapter.frames.get("owner")!.find(m => m.kind === "execute") as unknown as { invocationId: string };
+    registry.handleExecuteResult("stranger", execute.invocationId, true, '"forged"');
+    adapter.replyExecute("owner", "real");
+    await expect(p).resolves.toBe('"real"');
+  });
+});
+
+
+it("discovers exposed foreign tools only when their origin is requested", () => {
+  registry.handleRegister("owner", "reg", TEST_TOOL, ["https://caller.example"]);
+  registry.setOrigin(TEST_TOOL.name, "https://owner.example");
+  registry.handleGetToolsRequest("caller", "implicit", "https://caller.example");
+  expect(adapter.frames.get("caller")!.at(-1)).toMatchObject({ tools: [] });
+  registry.handleGetToolsRequest("caller", "explicit", "https://caller.example", ["https://owner.example"]);
+  expect(adapter.frames.get("caller")!.at(-1)).toMatchObject({ tools: [{ name: TEST_TOOL.name }] });
+});

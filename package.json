@@ -15,9 +15,11 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "pnpm -r --filter './packages/**' build",
-    "test": "pnpm -r --filter './packages/**' test",
+    "build": "pnpm -r --filter './packages/**' build && pnpm build:native",
+    "test": "pnpm check:generated && pnpm -r --filter './packages/**' test",
     "typecheck": "pnpm -r --filter './packages/**' typecheck",
-    "clean": "pnpm -r exec rm -rf dist node_modules/.cache"
+    "clean": "pnpm -r exec rm -rf dist node_modules/.cache",
+    "build:native": "node packages/electron/build-native.mjs",
+    "check:generated": "node packages/electron/build-native.mjs --check"
   }
 }

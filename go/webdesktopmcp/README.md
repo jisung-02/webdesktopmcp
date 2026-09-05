@@ -19,11 +19,10 @@ func main() {
     err = wails.Run(&options.App{
         // ...
         Bind: []interface{}{mcp},          // JS에서 window.go.webdesktopmcp.Server 로 접근
-        OnStartup: func(ctx context.Context, _ options.App) error {
+        OnStartup: func(ctx context.Context) {
             mcp.SetEventEmitter(func(event string, data ...interface{}) {
                 runtime.EventsEmit(ctx, event, data...) // 호스트→JS 전달
             })
-            return nil
         },
         OnShutdown: func(_ context.Context) { _ = mcp.Close() },
         AssetServer: &assetserver.Options{
@@ -38,7 +37,7 @@ func main() {
 <script src="/webdesktopmcp.js"></script>
 ```
 
-페이지 코드는 표준 WebMCP API 그대로: `document.modelContext.registerTool({ name, description, inputSchema, execute })`.
+페이지 등록 API (실험적 CG 초안의 부분 구현): `document.modelContext.registerTool({ name, description, inputSchema, execute })`.
 
 ## 주요 API
 
@@ -49,14 +48,14 @@ func main() {
 | `SetEventEmitter(func(event string, data ...interface{}))` | 호스트→JS 메시지 전달기 (`runtime.EventsEmit` 연결) |
 | `Send(frameID string, message map[string]any)` | JS→호스트 (wails Bind용) |
 | `SetConfirmHook(func(toolName string, input map[string]any) bool)` | 민감 도구 게이트 |
-| `SetFrameOrigin(frameID, origin)` | 프레임 origin 기록 (JS가 `_origin`으로도 전송) |
+| `SetFrameOrigin(frameID, origin)` | 호스트가 신뢰한 origin 기록 (페이지 `_origin`은 인증 근거로 사용하지 않음) |
 | `FrameGone(frameID)` | 창 닫힘 시 도구 정리 |
 | `InitScript() / Handler()` | 부트스트랩 JS (`go:embed js/bootstrap.js`) |
 | `Close() error` | 서버 종료 + 레지스트리 엔트리 제거 |
 
 ## 부트스트랩 JS 동작
 
-`window.__webDesktopMcpHost {send, _deliver}`를 메인 월드에 정의하고, 네이티브 `document.modelContext`가 있으면 **미러 모드**(registerTool 래핑 → 호스트로 중계, 외부 호출은 캡처한 execute로 라우팅), 없으면 **폴리필 모드**(registerTool/unregisterTool/getTools/executeTool/ontoolchange, AbortSignal 수명 시맨틱)로 동작합니다. 선언형 `<form toolname>` API는 TS 코어(`@webdesktopmcp/core`)에만 구현되어 있습니다.
+공통 TypeScript 코어에서 생성한 스크립트를 주입합니다. 필요한 네이티브 메서드를 감지하면 설치 이후 `registerTool` 호출을 미러링하고, 그렇지 않으면 폴리필을 사용합니다. 폴리필은 선언형 `<form toolname>` 부분집합을 포함합니다. 네이티브 선언형 폼은 외부 MCP에 미러링하지 않습니다. 전체 브라우저 초안 적합성은 주장하지 않습니다.
 
 ## 연결
 
@@ -67,7 +66,8 @@ webdesktopmcp connect --app "내 앱"     # stdio 셈 (Claude Desktop)
 # 또는 HTTP 직접 연결: URL + Bearer 토큰(registry.json 참조)
 ```
 
-## 검증
+## 검증 범위 · 2026-09-05
 
-- `go build ./...`, `go vet ./...` 통과
-- `go test -race -count=1 ./...` — 22개 테스트(레지스트리, MCP HTTP 왕복, 인증, 확인 훅, 레지스트리 파일, 부트스트랩 JS 스모크) 통과
+`go build ./...`, `go vet ./...`, `go test -race -count=1 ./...`로 현재 checkout을 검증하세요. 로컬 빌드·자동 테스트는 실제 네이티브 GUI 검증이나 공식 WPT 적합성 검증을 의미하지 않습니다. 기능별 범위와 제한은 [지원 표](../../docs/support.md), 신뢰 경계는 [보안 모델](../../docs/security.md)를 참고하세요.
+
+`Send(frameID, message)`는 신뢰된 앱 renderer를 전제합니다. frameID는 플랫폼이 인증한 DOM 프레임 신원이 아닙니다. 교차 프레임 origin은 호스트에서 `SetFrameOrigin`으로 설정하세요.

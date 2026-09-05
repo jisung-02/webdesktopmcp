@@ -7,9 +7,13 @@ import type { HostMessage } from "@webdesktopmcp/protocol";
 
 class MockHost {
   sent: Record<string, unknown>[] = [];
+  autoAck = true;
   #handlers = new Set<(m: unknown) => void>();
   send(m: Record<string, unknown>) {
     this.sent.push(m);
+    if (this.autoAck && m.kind === "register") {
+      queueMicrotask(() => this.deliver({ kind: "registerResult", invocationId: m.invocationId as string, ok: true }));
+    }
   }
   onMessage(h: (m: unknown) => void) {
     this.#handlers.add(h);
@@ -124,4 +128,60 @@ describe("native mirror dispatch", () => {
 
     mirror.dispose();
   });
+});
+
+
+describe("native registration lifetime", () => {
+  function nativeHost(registerTool: (tool: unknown, options?: unknown) => Promise<undefined> = async () => undefined) {
+    const host = new MockHost();
+    host.autoAck = false;
+    Object.defineProperty(document, "modelContext", { configurable: true, value: { registerTool } });
+    cleanup = installNativeModelContextMirror(host, () => {});
+    return host;
+  }
+
+  it("does not mirror rejected native registrations", async () => {
+    const host = nativeHost(async () => { throw new Error("native rejected"); });
+    await expect(document.modelContext.registerTool({ name: "bad", description: "Bad", execute: async () => 1 })).rejects.toThrow("native rejected");
+    expect(host.sent.filter(m => m.kind === "register")).toHaveLength(0);
+  });
+
+  it("preserves exposedTo, title, and abort-based unregistration", async () => {
+    const host = nativeHost();
+    const controller = new AbortController();
+    const pending = document.modelContext.registerTool({ name: "private", title: "Private", description: "d", execute: async () => 1 }, { exposedTo: ["https://trusted.example"], signal: controller.signal });
+    await vi.waitFor(() => expect(host.sent.find(m => m.kind === "register")).toBeDefined());
+    const reg = host.sent.find(m => m.kind === "register")!;
+    host.deliver({ kind: "registerResult", invocationId: reg.invocationId as string, ok: true });
+    await pending;
+    expect(reg).toMatchObject({ exposedTo: ["https://trusted.example"], tool: { title: "Private" } });
+    controller.abort();
+    expect(host.sent.some(m => m.kind === "unregister" && m.name === "private")).toBe(true);
+    host.deliver({ kind: "execute", invocationId: "after-abort", name: "private", input: {} });
+    await vi.waitFor(() => expect(host.sent.find(m => m.kind === "executeResult" && m.invocationId === "after-abort")).toMatchObject({ ok: false }));
+  });
+
+  it("rolls native registration back when host registration fails", async () => {
+    let lifetime: AbortSignal | undefined;
+    const host = nativeHost(async (_tool, options) => { lifetime = (options as {signal?: AbortSignal} | undefined)?.signal; return undefined; });
+    const pending = document.modelContext.registerTool({ name: "clash", description: "d", execute: async () => 1 });
+    const rejected = expect(pending).rejects.toThrow("clash");
+    await vi.waitFor(() => expect(host.sent.find(m => m.kind === "register")).toBeDefined());
+    const reg = host.sent.find(m => m.kind === "register")!;
+    host.deliver({ kind: "registerResult", invocationId: reg.invocationId as string, ok: false, errorMessage: "clash" });
+    await rejected;
+    expect(lifetime?.aborted).toBe(true);
+  });
+});
+
+
+it("force-polyfill overrides a native context and restores it on disposal", () => {
+  const native = { registerTool: async () => undefined };
+  Object.defineProperty(document, "modelContext", { configurable: true, value: native });
+  const handle = bootstrapWebDesktopMcp({ bridge: new MockHost(), frameId: "main", appName: "A", appVersion: "1", native: "force-polyfill" });
+  cleanup = handle;
+  expect(handle?.mode).toBe("polyfill");
+  expect(document.modelContext).not.toBe(native);
+  handle!.dispose();
+  expect(document.modelContext).toBe(native);
 });

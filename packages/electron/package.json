@@ -11,7 +11,9 @@
   ],
   "scripts": {
     "build": "node build.mjs && tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/*.test.mjs",
+    "test:smoke": "electron test/smoke.cjs"
   },
   "dependencies": {
     "@webdesktopmcp/core": "workspace:*",

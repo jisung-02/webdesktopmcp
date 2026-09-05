@@ -45,7 +45,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  root?.unmount();
+  act(() => root?.unmount());
   root = undefined;
   polyfill?.dispose();
   polyfill = null;
@@ -85,6 +85,33 @@ function NotesApp({
 }
 
 describe("useMcpTool", () => {
+  it("uses only the registration signal with a native-shaped API across remounts", async () => {
+    polyfill?.dispose();
+    polyfill = null;
+    const registered = new Set<string>();
+    const signals: AbortSignal[] = [];
+    // The draft API has no unregisterTool extension.
+    Object.defineProperty(document, "modelContext", {
+      configurable: true,
+      value: {
+        async registerTool(tool: { name: string }, options: { signal: AbortSignal }) {
+          if (registered.has(tool.name)) throw new Error("Duplicate tool");
+          registered.add(tool.name);
+          signals.push(options.signal);
+          options.signal.addEventListener("abort", () => registered.delete(tool.name), { once: true });
+        },
+      },
+    });
+    for (let mount = 0; mount < 2; mount++) {
+      await act(async () => render(createElement(NotesApp, { notes: ["a"] })));
+      expect(registered.has("search-notes")).toBe(true);
+      act(() => root!.unmount());
+      root = undefined;
+      expect(signals[mount].aborted).toBe(true);
+      expect(registered.size).toBe(0);
+    }
+  });
+
   it("registers on mount through document.modelContext", () => {
     render(createElement(NotesApp, { notes: ["a"] }));
     const register = host.sent.find((m) => m.kind === "register") as

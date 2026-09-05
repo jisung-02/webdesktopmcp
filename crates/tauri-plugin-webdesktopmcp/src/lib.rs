@@ -21,7 +21,7 @@
 //! }
 //! ```
 //!
-//! The plugin injects `js/bootstrap.js` into every webview on page load
+//! The plugin injects the generated shared bootstrap into every webview on page load
 //! (idempotently) and exposes [`init_script`] for apps that prefer manual
 //! injection via `WebviewWindowBuilder::initialization_script(init_script())`
 //! for guaranteed pre-parse timing.
@@ -56,9 +56,8 @@ pub use config::WebDesktopMcpConfig;
 /// `plugin:webdesktopmcp|send`.
 pub const PLUGIN_NAME: &str = "webdesktopmcp";
 
-/// The embedded main-world bootstrap (bridge + native mirror / polyfill).
-/// Declared-form tool registration is out of scope here (the TS core owns
-/// it); see `js/bootstrap.js`.
+/// The generated main-world bootstrap: host bridge, native mirror/polyfill,
+/// and declarative forms from the shared TypeScript core.
 pub const BOOTSTRAP_JS: &str = include_str!("bootstrap.js");
 
 /// Returns the bootstrap script contents for apps that prefer manual
@@ -111,6 +110,22 @@ pub fn init(config: WebDesktopMcpConfig) -> tauri::plugin::TauriPlugin<Wry> {
         // the script is idempotent). For guaranteed pre-parse timing, apps can
         // additionally use `initialization_script(init_script())`.
         .on_page_load(|webview, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                if let Some(state) = webview.app_handle().try_state::<PluginState>() {
+                    let (changed, aborts) =
+                        registry::lock(&state.registry).remove_frame(webview.label());
+                    for (owner, invocation) in aborts {
+                        deliver(
+                            webview.app_handle(),
+                            &owner,
+                            &messages::abort_message(&invocation),
+                        );
+                    }
+                    if changed {
+                        notify_change(webview.app_handle(), &state.registry);
+                    }
+                }
+            }
             let inject = matches!(
                 payload.event(),
                 tauri::webview::PageLoadEvent::Started | tauri::webview::PageLoadEvent::Finished
@@ -126,7 +141,12 @@ pub fn init(config: WebDesktopMcpConfig) -> tauri::plugin::TauriPlugin<Wry> {
             window.on_window_event(move |event| {
                 if matches!(event, tauri::WindowEvent::Destroyed) {
                     if let Some(state) = app.try_state::<PluginState>() {
-                        if registry::lock(&state.registry).remove_frame(&label) {
+                        let (changed, aborts) =
+                            registry::lock(&state.registry).remove_frame(&label);
+                        for (owner, invocation) in aborts {
+                            deliver(&app, &owner, &messages::abort_message(&invocation));
+                        }
+                        if changed {
                             notify_change(&app, &state.registry);
                         }
                     }
@@ -143,7 +163,9 @@ fn setup(app: &AppHandle<Wry>, config: WebDesktopMcpConfig) {
         app_name: config.app_name.clone(),
         app_version: config.app_version.clone(),
         registry: registry.clone(),
-        sink: Arc::new(TauriSink { app: handle.clone() }),
+        sink: Arc::new(TauriSink {
+            app: handle.clone(),
+        }),
     });
 
     let server = match server::start(core.clone(), config.port.unwrap_or(0)) {

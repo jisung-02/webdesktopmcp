@@ -22,13 +22,14 @@ declare global {
   var __webDesktopMcpHost: unknown;
 }
 
-if (!(globalThis as { __webDesktopMcpHost?: unknown }).__webDesktopMcpHost) {
+if (process.isMainFrame && !(globalThis as { __webDesktopMcpHost?: unknown }).__webDesktopMcpHost) {
   const handlers = new Set<(message: unknown) => void>();
   ipcRenderer.on(RECV_CHANNEL, (_event, message: unknown) => {
     for (const handler of handlers) handler(message);
   });
   try {
     contextBridge.exposeInMainWorld("__webDesktopMcpHost", {
+      native: ipcRenderer.sendSync("webdesktopmcp:config").native,
       send: (message: unknown) => {
         ipcRenderer.send(SEND_CHANNEL, message);
       },
@@ -43,7 +44,9 @@ if (!(globalThis as { __webDesktopMcpHost?: unknown }).__webDesktopMcpHost) {
   }
 
   try {
-    void webFrame.executeJavaScript(mainWorldSource as unknown as string);
+    void webFrame.executeJavaScript(mainWorldSource as unknown as string).catch(err => {
+      console.error("[webdesktopmcp] main-world injection failed:", err);
+    });
   } catch (err) {
     console.error("[webdesktopmcp] main-world injection failed:", err);
   }

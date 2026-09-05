@@ -1,13 +1,13 @@
 # webdesktopmcp
 
-**Convierte aplicaciones de escritorio (Electron · Tauri · Wails) en servidores WebMCP.**
+**Un puente experimental WebMCP-to-MCP para Electron · Tauri · Wails**
 
-[English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [中文](README.zh.md) | [Français](README.fr.md) | Español
+[English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [中文](README.zh.md) | [Français](README.fr.md) | [Español](README.es.md)
 
-Con unas pocas líneas de código, los desarrolladores de apps de escritorio exponen las funcionalidades de su aplicación como **herramientas para agentes de IA** (Claude Desktop, Claude Code, Cursor, ChatGPT Desktop…). El código de la página usa tal cual la API estándar del [borrador W3C WebMCP](https://webmachinelearning.github.io/webmcp/) (`document.modelContext`) — y la librería cambia automáticamente a la API nativa real en cuanto el runtime la incluya.
+Expone funciones de la página a agentes externos mediante un servidor MCP local y un enlace CLI stdio. El [borrador CG WebMCP del 4 de septiembre de 2026](https://webmachinelearning.github.io/webmcp/) no es un estándar W3C ni pertenece al W3C Standards Track. Esta biblioteca no afirma conformidad completa.
 
 ```ts
-// Código de la app — la API estándar de W3C WebMCP, sin cambios
+// Experimental WebMCP draft API
 document.modelContext.registerTool({
   name: "search-orders",
   description: "Buscar pedidos por número de pedido o nombre del cliente",
@@ -27,26 +27,13 @@ document.modelContext.registerTool({
     "command": "npx", "args": ["-y", "@webdesktopmcp/cli", "connect", "--app", "MyApp"] } } }
 ```
 
-## Cómo funciona
+## Compatibilidad · 2026-09-05
 
-Los webviews de escritorio todavía no incluyen la API WebMCP nativa (el Chromium de Electron está por debajo de la 149; Tauri usa WKWebView/WebView2), así que la librería puentea tres capas:
+El modo nativo se selecciona detectando los métodos necesarios de `document.modelContext` durante la ejecución. Una versión o una bandera no garantiza disponibilidad. [Electron 44 incluye Chromium 152](https://www.electronjs.org/blog/electron-44-0) y [Chrome ofrece un origin trial desde 149](https://developer.chrome.com/docs/ai/webmcp).
 
-```
-[Página dentro del webview]
-  document.modelContext.registerTool(...)     ← polyfill o espejo nativo (la misma API)
-        │  IPC — protocolo de red en docs/protocol.md
-        ▼
-[Host nativo]  Electron main / Tauri (Rust) / Wails (Go)
-  Registro de herramientas + servidor MCP local (127.0.0.1, token bearer)
-        │
-        ├─ Streamable HTTP  ← Cursor, Claude Code, … conexión directa
-        └─ @webdesktopmcp/cli (shim stdio) ← Claude Desktop, …
-```
+El modo polyfill de los tres adaptadores comparte implementación y un subconjunto de formularios declarativos. El espejo nativo solo observa llamadas imperativas a `registerTool` posteriores a su instalación. Los formularios declarativos nativos no se exponen a clientes MCP externos. Los modos no son idénticos.
 
-**Compuerta por versión con prioridad nativa** — el adaptador de Electron comprueba `process.versions.chrome`:
-
-- **Chromium ≥ 149** → habilita WebMCP nativo mediante el interruptor `--enable-blink-features=WebMCP`. La página usa el **`document.modelContext` nativo real**; el adaptador solo envuelve `registerTool` de forma transparente para reflejar los registros hacia agentes externos (los agentes integrados del navegador siguen usando la ruta nativa).
-- **Inferior a 149** (todas hoy en día) → inyecta un polyfill con la semántica del W3C. El cambio es automático, sin modificar el código de la app.
+La biblioteca no reproduce todo el aislamiento iframe/Permissions Policy ni prohíbe la ejecución headless. Las herramientas deben validar sus entradas: no hay validación JSON Schema en tiempo de ejecución. Un `exposedTo` no vacío bloquea el descubrimiento y las llamadas externas por política de la biblioteca.
 
 ## Paquetes
 
@@ -55,7 +42,7 @@ Los webviews de escritorio todavía no incluyen la API WebMCP nativa (el Chromiu
 | [`@webdesktopmcp/protocol`](packages/protocol) | TS | Protocolo de red compartido por los hosts TS/Rust/Go ([especificación](docs/protocol.md)) |
 | [`@webdesktopmcp/core`](packages/core) | TS | Polyfill de `document.modelContext` + espejo nativo + API declarativa de formularios |
 | [`@webdesktopmcp/server`](packages/server) | TS | Servidor MCP local agnóstico del framework + registro de aplicaciones |
-| [`@webdesktopmcp/electron`](packages/electron) | TS | Adaptador Electron (inyección automática de preload, compuerta de versión, hook de confirmación) |
+| [`@webdesktopmcp/electron`](packages/electron) | TS | Adaptador Electron (inyección automática de preload, comdetección de funciones, hook de confirmación) |
 | [`@webdesktopmcp/cli`](packages/cli) | TS | Shim stdio `webdesktopmcp connect --app <nombre>` |
 | `crates/tauri-plugin-webdesktopmcp` | Rust | Plugin de Tauri v2 |
 | `go/webdesktopmcp` | Go | Paquete para Wails v2 |
@@ -81,9 +68,10 @@ const win = new BrowserWindow({
 });
 ```
 
-En el renderer basta con usar el código estándar `document.modelContext.registerTool` mostrado arriba. Para inferencia de tipos usa el helper `defineTool` de `@webdesktopmcp/core` (el tipo de la entrada se infiere dentro de `execute`). Al depurar, `window.__webDesktopMcp.listTools()` en la consola de DevTools muestra las herramientas registradas. También está soportada la **API declarativa de formularios** — un formulario se convierte en herramienta sin una sola línea de JavaScript:
+En el renderer basta con usar el código `document.modelContext.registerTool` mostrado arriba. Para inferencia de tipos usa el helper `defineTool` de `@webdesktopmcp/core` (el tipo de la entrada se infiere dentro de `execute`). Al depurar, `window.__webDesktopMcp.listTools()` en la consola de DevTools muestra las herramientas registradas. También está soportada la **API declarativa de formularios** — un formulario se convierte en herramienta sin una sola línea de JavaScript:
 
 ```html
+<!-- Polyfill mode: native declarative forms are not mirrored externally. -->
 <form toolname="order-coffee"
       tooldescription="Pedir un café. Recibe el tipo de bebida y el número de shots, devuelve un número de pedido."
       toolautosubmit>
@@ -146,19 +134,26 @@ pnpm --filter webdesktopmcp-electron-demo start
 node packages/cli/dist/cli.js list
 ```
 
-La app de demostración (`examples/electron-demo`) expone 4 herramientas imperativas más una herramienta declarativa de formulario (`order-coffee`). Desde Claude Desktop prueba *"muéstrame las tareas abiertas"* o *"pide un latte con 2 shots"*.
+Ejemplo en modo polyfill: La app de demostración (`examples/electron-demo`) expone 4 herramientas imperativas más una herramienta declarativa de formulario (`order-coffee`). Desde Claude Desktop prueba *"muéstrame las tareas abiertas"* o *"pide un latte con 2 shots"*.
 
 ## Estado de verificación
 
-- `@webdesktopmcp/core` — vitest **19/19** (semántica del polyfill, formularios declarativos, espejo nativo)
-- `@webdesktopmcp/server` — vitest **9/9** (registro, initialize/list/call MCP por HTTP, autenticación, filtro de exposición, hook de confirmación)
-- Demo Electron — **verificada de extremo a extremo en una app real**: arranque → inyección de preload → 5 herramientas registradas → `tools/call` por HTTP para herramientas imperativas y declarativas → también invocadas a través del shim stdio de la CLI
-- Tauri (Rust) / Wails (Go) — verificados con `cargo check`/`go build` y sus suites de pruebas (ver el README de cada directorio)
+Instalación, configuración de Tauri/Wails y CLI: [guía en inglés](README.md). La [matriz de compatibilidad](docs/support.md) define funciones y alcance de verificación; consulte también la [seguridad](docs/security.md). Las pruebas locales no acreditan conformidad con WPT oficiales ni validación de GUI nativas en todas las plataformas.
 
-## Relación con el estándar WebMCP
+```bash
+pnpm build
+pnpm test
+pnpm typecheck
+```
 
-Esta librería lleva la API del lado de la página del [borrador W3C WebMCP CG](https://webmachinelearning.github.io/webmcp/) ([repo](https://github.com/webmachinelearning/webmcp); prueba de origen en Chrome 149 / Edge 150) a los webviews de escritorio. La prueba de concepto original es [jasonjmcghee/WebMCP](https://github.com/jasonjmcghee/WebMCP); el ecosistema de herramientas está en MCP-B ([sitio](https://mcp-b.ai)). La investigación técnica completa (en coreano): [webmcp-research.md](webmcp-research.md).
+## Relación con el borrador WebMCP
+
+Expone funciones de la página a agentes externos mediante un servidor MCP local y un enlace CLI stdio. El [borrador CG WebMCP del 4 de septiembre de 2026](https://webmachinelearning.github.io/webmcp/) no es un estándar W3C ni pertenece al W3C Standards Track. Esta biblioteca no afirma conformidad completa.
+
+[Support and verification](docs/support.md) · [Research notes](webmcp-research.md)
 
 ## Licencia
 
 MIT
+
+[References and implementation evidence](docs/references.md)

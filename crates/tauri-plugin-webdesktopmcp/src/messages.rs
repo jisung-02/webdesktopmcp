@@ -42,7 +42,7 @@ pub struct RegisteredToolInfo {
     pub origin: String,
     /// Tauri webview label of the owning frame.
     pub frame_id: String,
-    /// Empty = visible to everyone; non-empty = in-page-agent-only allowlist.
+    /// Empty = same-origin pages and external MCP; non-empty also allows listed page origins.
     pub exposed_to: Vec<String>,
 }
 
@@ -70,9 +70,9 @@ impl RegisteredToolInfo {
         v
     }
 
-    /// True when `origin` may see this tool (empty `exposedTo` = public).
+    /// Same-origin pages always have access; foreign pages require explicit exposure.
     pub fn is_exposed_to(&self, origin: &str) -> bool {
-        self.exposed_to.is_empty() || self.exposed_to.iter().any(|o| o == origin)
+        self.origin == origin || self.exposed_to.iter().any(|o| o == origin)
     }
 }
 
@@ -82,10 +82,7 @@ pub fn validate_declaration(value: &Value) -> Result<ToolDeclaration, String> {
     let Some(obj) = value.as_object() else {
         return Err("Tool must be an object.".to_string());
     };
-    let name = obj
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
+    let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or_default();
     if !is_valid_tool_name(name) {
         return Err(format!(
             "Invalid tool name: must be 1-128 characters of [A-Za-z0-9_.-], got {name:?}."
@@ -116,11 +113,7 @@ pub fn validate_declaration(value: &Value) -> Result<ToolDeclaration, String> {
     let annotations = match obj.get("annotations") {
         None | Some(Value::Null) => None,
         Some(a) if a.is_object() => Some(a.clone()),
-        Some(_) => {
-            return Err(format!(
-                "Tool \"{name}\": annotations must be an object."
-            ))
-        }
+        Some(_) => return Err(format!("Tool \"{name}\": annotations must be an object.")),
     };
     Ok(ToolDeclaration {
         name: name.to_string(),
@@ -158,13 +151,13 @@ pub enum RendererMessage {
         request_id: String,
         name: String,
         input: Value,
-        from_origin: String,
     },
+    /// Cancels a forwarded request owned by the sender.
+    CancelForward { request_id: String },
     /// `getToolsRequest` — cross-frame tool discovery.
     GetToolsRequest {
         request_id: String,
         from_origins: Option<Vec<String>>,
-        for_origin: String,
     },
     /// `toolRemoved` (reserved; host-side removal is authoritative).
     ToolRemoved { name: String },
@@ -225,14 +218,13 @@ pub fn parse_renderer_message(value: &Value) -> Result<RendererMessage, String> 
             request_id: str_field("requestId")?,
             name: str_field("name")?,
             input: value.get("input").cloned().unwrap_or(json!({})),
-            from_origin: str_field("fromOrigin")
-                .unwrap_or_else(|_| "unknown".to_string()),
+        }),
+        "cancelForward" => Ok(RendererMessage::CancelForward {
+            request_id: str_field("requestId")?,
         }),
         "getToolsRequest" => Ok(RendererMessage::GetToolsRequest {
             request_id: str_field("requestId")?,
             from_origins: string_list("fromOrigins"),
-            for_origin: str_field("forOrigin")
-                .unwrap_or_else(|_| "unknown".to_string()),
         }),
         "toolRemoved" => Ok(RendererMessage::ToolRemoved {
             name: str_field("name")?,
@@ -340,10 +332,7 @@ pub fn normalize_origin(url: &str) -> String {
                 Some(host) if !host.is_empty() => format!(
                     "{}://{host}{}",
                     parsed.scheme(),
-                    parsed
-                        .port()
-                        .map(|p| format!(":{p}"))
-                        .unwrap_or_default()
+                    parsed.port().map(|p| format!(":{p}")).unwrap_or_default()
                 ),
                 _ => serialized,
             }
@@ -414,6 +403,11 @@ mod tests {
             other => panic!("wrong variant: {other:?}"),
         }
 
+        assert!(
+            matches!(parse_renderer_message(&json!({"kind": "cancelForward", "requestId": "r"})).unwrap(),
+            RendererMessage::CancelForward { request_id } if request_id == "r")
+        );
+        assert!(parse_renderer_message(&json!({"kind": "cancelForward"})).is_err());
         assert!(parse_renderer_message(&json!({"kind": "wat"})).is_err());
         assert!(parse_renderer_message(&json!({"kind": "register"})).is_err());
     }
@@ -424,10 +418,19 @@ mod tests {
             normalize_origin("http://localhost:3000/path?x=1"),
             "http://localhost:3000"
         );
-        assert_eq!(normalize_origin("https://example.com"), "https://example.com");
+        assert_eq!(
+            normalize_origin("https://example.com"),
+            "https://example.com"
+        );
         // Default ports are elided, like `new URL(...).origin` in a page.
-        assert_eq!(normalize_origin("http://example.com:80/a"), "http://example.com");
-        assert_eq!(normalize_origin("https://example.com:443"), "https://example.com");
+        assert_eq!(
+            normalize_origin("http://example.com:80/a"),
+            "http://example.com"
+        );
+        assert_eq!(
+            normalize_origin("https://example.com:443"),
+            "https://example.com"
+        );
         // Custom webview schemes keep their host (matches location.origin).
         assert_eq!(normalize_origin("tauri://localhost"), "tauri://localhost");
         // file: URLs keep their full URL (matches the TS reference).

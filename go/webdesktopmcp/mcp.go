@@ -253,6 +253,7 @@ func (s *Server) toolsList() map[string]any {
 			m["title"] = title
 		}
 		if ann, ok := t.decl["annotations"].(map[string]any); ok {
+			m["_meta"].(map[string]any)["webdesktopmcp/annotations"] = cloneMap(ann)
 			a := map[string]any{}
 			if ro, ok := ann["readOnlyHint"].(bool); ok {
 				a["readOnlyHint"] = ro
@@ -320,7 +321,9 @@ func (s *Server) toolsCall(ctx context.Context, params json.RawMessage) any {
 		"content": []any{map[string]any{"type": "text", "text": result}},
 	}
 	if structured, ok := safeParseJSON(result); ok {
-		out["structuredContent"] = structured
+		if object, ok := structured.(map[string]any); ok && object != nil {
+			out["structuredContent"] = object
+		}
 	}
 	return out
 }

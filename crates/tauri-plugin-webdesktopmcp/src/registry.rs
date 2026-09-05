@@ -17,9 +17,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::messages::{
-    self, RegisteredToolInfo, ToolDeclaration,
-};
+use crate::messages::{self, RegisteredToolInfo, ToolDeclaration};
 
 /// Per-invocation timeout, mirroring the reference server's 120s.
 pub const INVOCATION_TIMEOUT_MS: u64 = 120_000;
@@ -32,7 +30,9 @@ pub fn invocation_timeout() -> Duration {
 /// Locks a mutex, recovering from poisoning (a panicked handler must not take
 /// down the whole tool surface).
 pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// A pending tool invocation: the host is waiting for the owning webview to
@@ -41,6 +41,7 @@ struct Pending {
     tx: Sender<Result<String, String>>,
     /// Owning frame, kept so timeouts can propagate an `abort` message.
     frame_id: String,
+    caller: Option<(String, String)>,
 }
 
 /// Everything a caller needs to deliver an `execute` request and await its
@@ -82,6 +83,21 @@ impl Registry {
     /// All registered tools.
     pub fn list(&self) -> Vec<&RegisteredToolInfo> {
         self.tools.values().collect()
+    }
+
+    /// Same-origin tools plus explicitly requested origins that expose tools to the caller.
+    pub fn list_for_origin(
+        &self,
+        origin: &str,
+        from: Option<&[String]>,
+    ) -> Vec<&RegisteredToolInfo> {
+        self.list()
+            .into_iter()
+            .filter(|tool| {
+                tool.is_exposed_to(origin)
+                    && (tool.origin == origin || from.is_some_and(|origins| origins.contains(&tool.origin)))
+            })
+            .collect()
     }
 
     /// Look up a tool by name.
@@ -157,12 +173,27 @@ impl Registry {
         }
     }
 
-    /// Removes every tool owned by `frame_id` (webview destroyed).
-    /// Returns whether anything changed.
-    pub fn remove_frame(&mut self, frame_id: &str) -> bool {
+    /// Removes a webview's tools and pending calls; returns abort deliveries (owner, invocation).
+    pub fn remove_frame(&mut self, frame_id: &str) -> (bool, Vec<(String, String)>) {
         let before = self.tools.len();
         self.tools.retain(|_, info| info.frame_id != frame_id);
-        before != self.tools.len()
+        self.frame_origins.remove(frame_id);
+        let ids: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|(_, p)| {
+                p.frame_id == frame_id
+                    || p.caller
+                        .as_ref()
+                        .is_some_and(|(caller, _)| caller == frame_id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let aborts = ids
+            .into_iter()
+            .filter_map(|id| self.cancel_pending(&id).map(|owner| (owner, id)))
+            .collect();
+        (before != self.tools.len(), aborts)
     }
 
     /// Records the origin of a frame that may not have registered anything
@@ -183,6 +214,9 @@ impl Registry {
                 "Unknown tool \"{name}\". It may have been unregistered by the app."
             ));
         };
+        if !info.exposed_to.is_empty() {
+            return Err(format!("Tool \"{name}\" is reserved for in-page agents (exposed_to) and is not callable by external clients."));
+        }
         let frame_id = info.frame_id.clone();
         let invocation_id = self.next_invocation_id("inv");
         let message = messages::execute_message(
@@ -196,6 +230,7 @@ impl Registry {
             Pending {
                 tx,
                 frame_id: frame_id.clone(),
+                caller: None,
             },
         );
         Ok(Started {
@@ -221,17 +256,23 @@ impl Registry {
         let fail = |code: &str, message: String| -> Value {
             messages::execute_forward_result(request_id, false, None, Some(code), Some(&message))
         };
-        let Some(info) = self.tools.get(name) else {
-            return Err(fail("NotFoundError", format!("Tool \"{name}\" is not registered.")));
-        };
-        if info.frame_id == caller_frame {
-            // Same frame: the local polyfill executes directly; this path is
-            // effectively unreachable — respond cleanly.
+        if self.pending.values().any(|pending| {
+            pending
+                .caller
+                .as_ref()
+                .is_some_and(|(frame, request)| frame == caller_frame && request == request_id)
+        }) {
             return Err(fail(
                 "InvalidStateError",
-                format!("Tool \"{name}\" belongs to the calling frame."),
+                "Forward request ID is already pending.".into(),
             ));
         }
+        let Some(info) = self.tools.get(name) else {
+            return Err(fail(
+                "NotFoundError",
+                format!("Tool \"{name}\" is not registered."),
+            ));
+        };
         if !info.is_exposed_to(from_origin) {
             return Err(fail(
                 "SecurityError",
@@ -251,6 +292,7 @@ impl Registry {
             Pending {
                 tx,
                 frame_id: frame_id.clone(),
+                caller: Some((caller_frame.to_string(), request_id.to_string())),
             },
         );
         Ok(Started {
@@ -267,12 +309,20 @@ impl Registry {
     /// channel. Returns `true` when a pending invocation was matched.
     pub fn handle_execute_result(
         &mut self,
+        frame_id: &str,
         invocation_id: &str,
         ok: bool,
         result: Option<&str>,
         error_code: Option<&str>,
         error_message: Option<&str>,
     ) -> bool {
+        if !self
+            .pending
+            .get(invocation_id)
+            .is_some_and(|p| p.frame_id == frame_id)
+        {
+            return false;
+        }
         let Some(pending) = self.pending.remove(invocation_id) else {
             return false;
         };
@@ -287,12 +337,30 @@ impl Registry {
         pending.tx.send(outcome).is_ok()
     }
 
+    /// Cancels only the forwarding request owned by the invoking webview.
+    pub fn cancel_forward(&mut self, frame: &str, request: &str) -> Option<(String, String)> {
+        let id = self
+            .pending
+            .iter()
+            .find(|(_, pending)| {
+                pending
+                    .caller
+                    .as_ref()
+                    .is_some_and(|(f, r)| f == frame && r == request)
+            })
+            .map(|(id, _)| id.clone())?;
+        self.cancel_pending(&id).map(|owner| (owner, id))
+    }
+
     /// Drops a pending invocation (timeout / cancellation). Returns the
     /// owning frame so the caller can send an `abort` message.
     pub fn cancel_pending(&mut self, invocation_id: &str) -> Option<String> {
-        self.pending
-            .remove(invocation_id)
-            .map(|pending| pending.frame_id)
+        self.pending.remove(invocation_id).map(|pending| {
+            let _ = pending
+                .tx
+                .send(Err("Tool invocation cancelled or frame removed.".into()));
+            pending.frame_id
+        })
     }
 }
 
@@ -309,6 +377,112 @@ mod tests {
             input_schema: None,
             annotations: None,
         }
+    }
+
+    #[test]
+    fn external_invocation_rejects_restricted_tool_atomically() {
+        let mut reg = Registry::new();
+        reg.handle_register("main", "http://a", decl("secret"), vec!["http://a".into()]);
+        assert!(reg.begin_invoke("secret", json!({})).is_err());
+        assert!(reg.pending.is_empty());
+    }
+
+    #[test]
+    fn forwarding_request_ids_are_unique_per_caller() {
+        let mut reg = Registry::new();
+        reg.handle_register("main", "http://a", decl("work"), vec![]);
+        reg.begin_forward("caller", "r", "work", json!({}), "http://a")
+            .unwrap();
+        assert!(reg
+            .begin_forward("caller", "r", "work", json!({}), "http://a")
+            .is_err());
+        assert!(reg
+            .begin_forward("other", "r", "work", json!({}), "http://a")
+            .is_ok());
+    }
+
+    #[test]
+    fn same_origin_access_and_foreign_default_denial() {
+        let mut reg = Registry::new();
+        reg.handle_register(
+            "main",
+            "http://a",
+            decl("local"),
+            vec!["http://trusted".into()],
+        );
+        assert!(reg
+            .begin_forward("main", "own", "local", json!({}), "http://a")
+            .is_ok());
+        assert!(reg
+            .begin_forward("peer", "same", "local", json!({}), "http://a")
+            .is_ok());
+        reg.handle_register("main", "http://a", decl("default"), vec![]);
+        assert_eq!(
+            reg.begin_forward("peer", "foreign", "default", json!({}), "http://b")
+                .unwrap_err()["errorCode"],
+            "SecurityError"
+        );
+    }
+
+    #[test]
+    fn frame_removal_settles_pending_and_removes_origin() {
+        let mut reg = Registry::new();
+        reg.handle_register("main", "http://a", decl("work"), vec![]);
+        let started = reg.begin_invoke("work", json!({})).unwrap();
+        reg.remove_frame("main");
+        assert!(
+            started.rx.try_recv().is_ok(),
+            "removed owner must settle pending calls"
+        );
+        assert!(reg.frame_labels().is_empty());
+    }
+
+    #[test]
+    fn only_owner_can_complete_and_only_caller_can_cancel() {
+        let mut reg = Registry::new();
+        reg.handle_register("owner", "http://a", decl("work"), vec![]);
+        let call = reg
+            .begin_forward("caller", "r", "work", json!({}), "http://a")
+            .unwrap();
+        assert!(!reg.handle_execute_result(
+            "intruder",
+            &call.invocation_id,
+            true,
+            Some("fake"),
+            None,
+            None
+        ));
+        assert!(reg.cancel_forward("intruder", "r").is_none());
+        assert!(matches!(call.rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert_eq!(
+            reg.cancel_forward("caller", "r"),
+            Some(("owner".into(), call.invocation_id.clone()))
+        );
+        assert!(call.rx.recv().unwrap().is_err());
+        assert!(reg.cancel_forward("caller", "r").is_none());
+        assert!(!reg.handle_execute_result(
+            "owner",
+            &call.invocation_id,
+            true,
+            Some("late"),
+            None,
+            None
+        ));
+    }
+
+    #[test]
+    fn listing_keeps_same_origin_tools_and_caller_removal_aborts_owner() {
+        let mut reg = Registry::new();
+        reg.handle_register("owner", "http://a", decl("work"), vec![]);
+        assert_eq!(reg
+            .list_for_origin("http://a", Some(&["http://other".into()]))
+            .len(), 1);
+        let call = reg
+            .begin_forward("caller", "r", "work", json!({}), "http://a")
+            .unwrap();
+        let (_, aborts) = reg.remove_frame("caller");
+        assert_eq!(aborts, vec![("owner".into(), call.invocation_id)]);
+        assert!(call.rx.recv().unwrap().is_err());
     }
 
     #[test]
@@ -337,10 +511,10 @@ mod tests {
         let mut reg = Registry::new();
         reg.handle_register("main", "http://a", decl("a_tool"), vec![]);
         reg.handle_register("panel", "http://b", decl("b_tool"), vec![]);
-        assert!(reg.remove_frame("main"));
+        assert!(reg.remove_frame("main").0);
         assert!(reg.get("a_tool").is_none());
         assert!(reg.get("b_tool").is_some());
-        assert!(!reg.remove_frame("main"));
+        assert!(!reg.remove_frame("main").0);
     }
 
     #[test]
@@ -355,12 +529,19 @@ mod tests {
         assert_eq!(started.message["kind"], "execute");
         assert_eq!(started.message["name"], "compute");
 
-        assert!(reg.handle_execute_result(&started.invocation_id, true, Some("\"ok\""), None, None));
+        assert!(reg.handle_execute_result(
+            "main",
+            &started.invocation_id,
+            true,
+            Some("\"ok\""),
+            None,
+            None
+        ));
         let result = started.rx.recv().unwrap().unwrap();
         assert_eq!(result, "\"ok\"");
 
         // Unknown invocation ids are ignored.
-        assert!(!reg.handle_execute_result("inv-999", true, Some("1"), None, None));
+        assert!(!reg.handle_execute_result("main", "inv-999", true, Some("1"), None, None));
     }
 
     #[test]
@@ -369,6 +550,7 @@ mod tests {
         reg.handle_register("main", "http://a", decl("boom"), vec![]);
         let started = reg.begin_invoke("boom", json!({})).unwrap();
         reg.handle_execute_result(
+            "main",
             &started.invocation_id,
             false,
             None,
@@ -401,12 +583,6 @@ mod tests {
             .expect("exposed");
         assert_eq!(started.frame_id, "main");
 
-        // Same frame is rejected.
-        let err = reg
-            .begin_forward("main", "r3", "secret", json!({}), "http://trusted")
-            .unwrap_err();
-        assert_eq!(err["errorCode"], "InvalidStateError");
-
         // Unknown tool.
         let err = reg
             .begin_forward("panel", "r4", "nope", json!({}), "http://trusted")
@@ -426,40 +602,18 @@ mod tests {
             vec!["http://agent".to_string()],
         );
 
-        let requested = |reg: &Registry, frame: &str, for_origin: &str, from: Option<Vec<String>>| {
-            reg.list()
+        let requested = |reg: &Registry, origin: &str, from: Option<Vec<String>>| {
+            let mut names = reg
+                .list_for_origin(origin, from.as_deref())
                 .into_iter()
-                .filter(|t| {
-                    if t.frame_id == frame {
-                        return true;
-                    }
-                    if let Some(from) = &from {
-                        if !from.is_empty() && !from.iter().any(|o| o == &t.origin) {
-                            return false;
-                        }
-                    }
-                    t.is_exposed_to(for_origin)
-                })
                 .map(|t| t.tool.name.clone())
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            names.sort();
+            names
         };
-
-        let mut names = requested(&reg, "main", "http://agent", None);
-        names.sort();
-        assert_eq!(names, vec!["open", "own", "restricted"]);
-
-        let mut names = requested(&reg, "main", "http://stranger", None);
-        names.sort();
-        assert_eq!(names, vec!["open", "own"]);
-
-        // fromOrigins restriction.
-        let mut names = requested(
-            &reg,
-            "main",
-            "http://agent",
-            Some(vec!["http://b".to_string()]),
-        );
-        names.sort();
-        assert_eq!(names, vec!["open", "own"]);
+        assert!(requested(&reg, "http://agent", None).is_empty());
+        assert_eq!(requested(&reg, "http://agent", Some(vec!["http://c".into()])), vec!["restricted"]);
+        assert_eq!(requested(&reg, "http://a", None), vec!["own"]);
+        assert_eq!(requested(&reg, "http://a", Some(vec!["http://b".into()])), vec!["own"]);
     }
 }

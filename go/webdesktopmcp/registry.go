@@ -59,17 +59,9 @@ func (t *toolEntry) info() map[string]any {
 	return info
 }
 
-// isExposedTo mirrors the TS helper: tools without exposedTo are public.
+// Same-origin access is implicit; cross-origin access requires an explicit grant.
 func isExposedTo(t *toolEntry, origin string) bool {
-	if len(t.exposedTo) == 0 {
-		return true
-	}
-	for _, o := range t.exposedTo {
-		if o == origin {
-			return true
-		}
-	}
-	return false
+	return origin != "" && origin != "null" && (t.origin == origin || containsString(t.exposedTo, origin))
 }
 
 func containsString(list []string, s string) bool {
@@ -139,7 +131,8 @@ type callOutcome struct {
 
 // pendingInvoke is an in-flight MCP tools/call awaiting its executeResult.
 type pendingInvoke struct {
-	ch chan callOutcome // buffered 1: the completer never blocks
+	ch           chan callOutcome // buffered 1: the completer never blocks
+	ownerFrameID string
 }
 
 // pendingForward is an in-flight executeForward awaiting the owner frame's
@@ -147,6 +140,8 @@ type pendingInvoke struct {
 type pendingForward struct {
 	callerFrameID string
 	requestID     string
+	ownerFrameID  string
+	timer         *time.Timer
 }
 
 // ToolRegistry tracks registered tools and in-flight invocations. Safe for
@@ -187,6 +182,13 @@ func (r *ToolRegistry) setTimeout(d time.Duration) {
 func (r *ToolRegistry) SetFrameOrigin(frameID, origin string) {
 	r.mu.Lock()
 	r.frameOrigins[frameID] = origin
+	for name, t := range r.tools {
+		if t.frameID == frameID {
+			copy := *t
+			copy.origin = origin
+			r.tools[name] = &copy
+		}
+	}
 	r.mu.Unlock()
 }
 
@@ -306,23 +308,58 @@ func (r *ToolRegistry) removeFrame(frameID string) {
 			delete(r.tools, name)
 		}
 	}
+	for id, p := range r.pending {
+		if p.ownerFrameID == frameID {
+			delete(r.pending, id)
+			p.ch <- callOutcome{errorCode: "InvalidStateError", errorMessage: "Tool owner frame disconnected."}
+		}
+	}
+	aborts := map[string]string{}
+	failures := map[string]*pendingForward{}
+	for id, f := range r.forwards {
+		if f.ownerFrameID == frameID || f.callerFrameID == frameID {
+			delete(r.forwards, id)
+			f.timer.Stop()
+			if f.ownerFrameID != frameID {
+				aborts[id] = f.ownerFrameID
+			}
+			if f.callerFrameID != frameID {
+				failures[id] = f
+			}
+		}
+	}
 	delete(r.frameOrigins, frameID)
 	delete(r.frameSessions, frameID)
 	r.mu.Unlock()
+	for id, owner := range aborts {
+		r.send(owner, map[string]any{"kind": "abort", "invocationId": id})
+	}
+	for _, f := range failures {
+		r.send(f.callerFrameID, map[string]any{"kind": "executeForwardResult", "requestId": f.requestID, "ok": false, "errorCode": "InvalidStateError", "errorMessage": "Tool owner frame disconnected."})
+	}
 }
 
 // invoke routes a tools/call to the owning frame and blocks until the frame
 // answers, the timeout fires, or done closes (MCP client went away → abort).
 func (r *ToolRegistry) invoke(name string, input any, done <-chan struct{}) (string, error) {
+	select {
+	case <-done:
+		return "", fmt.Errorf("Tool %q invocation was cancelled.", name)
+	default:
+	}
 	r.mu.Lock()
 	t, ok := r.tools[name]
 	if !ok {
 		r.mu.Unlock()
 		return "", fmt.Errorf("Unknown tool %q. It may have been unregistered by the app.", name)
 	}
+	if len(t.exposedTo) > 0 {
+		r.mu.Unlock()
+		return "", fmt.Errorf("Tool %q is reserved for in-page agents (exposedTo) and is not callable by external clients.", name)
+	}
 	r.seq++
 	invID := fmt.Sprintf("inv-%s-%d", t.frameID, r.seq)
-	p := &pendingInvoke{ch: make(chan callOutcome, 1)}
+	p := &pendingInvoke{ch: make(chan callOutcome, 1), ownerFrameID: t.frameID}
 	r.pending[invID] = p
 	frameID := t.frameID
 	timeout := r.timeout
@@ -355,6 +392,7 @@ func (r *ToolRegistry) invoke(name string, input any, done <-chan struct{}) (str
 			delete(r.pending, invID)
 		}
 		r.mu.Unlock()
+		r.send(frameID, map[string]any{"kind": "abort", "invocationId": invID})
 		return "", fmt.Errorf("Tool %q timed out after %s (no response from the app webview).", name, timeout)
 	case <-done:
 		r.mu.Lock()
@@ -369,15 +407,16 @@ func (r *ToolRegistry) invoke(name string, input any, done <-chan struct{}) (str
 
 // handleExecuteResult processes an `executeResult` from a frame: completes an
 // MCP tools/call, or relays to the forward caller as executeForwardResult.
-func (r *ToolRegistry) handleExecuteResult(invocationID string, ok bool, result, errorCode, errorMessage string) {
+func (r *ToolRegistry) handleExecuteResult(frameID, invocationID string, ok bool, result, errorCode, errorMessage string) {
 	r.mu.Lock()
-	if p, found := r.pending[invocationID]; found {
+	if p, found := r.pending[invocationID]; found && p.ownerFrameID == frameID {
 		delete(r.pending, invocationID)
 		r.mu.Unlock()
 		p.ch <- callOutcome{ok: ok, result: result, errorCode: errorCode, errorMessage: errorMessage}
 		return
 	}
-	if f, found := r.forwards[invocationID]; found {
+	if f, found := r.forwards[invocationID]; found && f.ownerFrameID == frameID {
+		f.timer.Stop()
 		delete(r.forwards, invocationID)
 		caller, requestID := f.callerFrameID, f.requestID
 		r.mu.Unlock()
@@ -405,7 +444,7 @@ func (r *ToolRegistry) handleExecuteResult(invocationID string, ok bool, result,
 // handleExecuteForward processes `executeForward`: an in-page agent in one
 // frame invoking another frame's tool. Enforces exposedTo, routes to the
 // owner, and relays the outcome as executeForwardResult to the caller.
-func (r *ToolRegistry) handleExecuteForward(callerFrameID, requestID, name string, input any, fromOrigin string) {
+func (r *ToolRegistry) handleExecuteForward(callerFrameID, requestID, name string, input any) {
 	fail := func(code, errMsg string) {
 		r.send(callerFrameID, map[string]any{
 			"kind": "executeForwardResult", "requestId": requestID, "ok": false,
@@ -419,24 +458,26 @@ func (r *ToolRegistry) handleExecuteForward(callerFrameID, requestID, name strin
 		fail("NotFoundError", fmt.Sprintf("Tool %q is not registered.", name))
 		return
 	}
-	if t.frameID == callerFrameID {
-		r.mu.Unlock()
-		fail("InvalidStateError", fmt.Sprintf("Tool %q belongs to the calling frame.", name))
-		return
-	}
-	if !isExposedTo(t, fromOrigin) {
+	fromOrigin := r.frameOrigins[callerFrameID]
+	if t.frameID != callerFrameID && !isExposedTo(t, fromOrigin) {
 		r.mu.Unlock()
 		fail("SecurityError", fmt.Sprintf("Tool %q is not exposed to origin %q.", name, fromOrigin))
 		return
 	}
+	for _, f := range r.forwards {
+		if f.callerFrameID == callerFrameID && f.requestID == requestID {
+			r.mu.Unlock()
+			fail("InvalidStateError", "Request is already pending.")
+			return
+		}
+	}
 	r.seq++
 	invID := fmt.Sprintf("fwd-%s-%d", t.frameID, r.seq)
 	owner := t.frameID
-	r.forwards[invID] = &pendingForward{callerFrameID: callerFrameID, requestID: requestID}
+	f := &pendingForward{callerFrameID: callerFrameID, requestID: requestID, ownerFrameID: owner}
+	r.forwards[invID] = f
 	timeout := r.timeout
-	r.mu.Unlock()
-
-	time.AfterFunc(timeout, func() {
+	f.timer = time.AfterFunc(timeout, func() {
 		r.mu.Lock()
 		if _, still := r.forwards[invID]; !still {
 			r.mu.Unlock()
@@ -444,28 +485,44 @@ func (r *ToolRegistry) handleExecuteForward(callerFrameID, requestID, name strin
 		}
 		delete(r.forwards, invID)
 		r.mu.Unlock()
+		r.send(owner, map[string]any{"kind": "abort", "invocationId": invID})
 		fail("TimeoutError", fmt.Sprintf("Forwarded call to %q timed out.", name))
 	})
+	r.mu.Unlock()
 
 	r.send(owner, map[string]any{"kind": "execute", "invocationId": invID, "name": name, "input": normalizeInput(input)})
 }
 
-// handleGetToolsRequest aggregates the registry for an in-page agent:
-// the caller's own tools are always visible; foreign tools must pass the
-// fromOrigins filter (when provided) and be exposed to forOrigin.
-func (r *ToolRegistry) handleGetToolsRequest(frameID, requestID, forOrigin string, fromOrigins []string) {
-	tools := r.list()
-	out := make([]map[string]any, 0, len(tools))
-	for _, t := range tools {
-		if t.frameID != frameID {
-			if len(fromOrigins) > 0 && !containsString(fromOrigins, t.origin) {
-				continue
-			}
-			if !isExposedTo(t, forOrigin) {
-				continue
-			}
+// handleCancelForward only cancels requests owned by the sending caller.
+func (r *ToolRegistry) handleCancelForward(frameID, requestID string) {
+	r.mu.Lock()
+	for id, f := range r.forwards {
+		if f.callerFrameID == frameID && f.requestID == requestID {
+			delete(r.forwards, id)
+			f.timer.Stop()
+			r.mu.Unlock()
+			r.send(f.ownerFrameID, map[string]any{"kind": "abort", "invocationId": id})
+			return
+		}
+	}
+	r.mu.Unlock()
+}
+
+// handleGetToolsRequest includes same-origin tools plus explicitly requested, exposed origins.
+func (r *ToolRegistry) handleGetToolsRequest(frameID, requestID string, fromOrigins []string) {
+	r.mu.Lock()
+	origin := r.frameOrigins[frameID]
+	out := make([]map[string]any, 0)
+	for _, t := range r.tools {
+		if t.frameID != frameID && t.origin != origin && !containsString(fromOrigins, t.origin) {
+			continue
+		}
+		if t.frameID != frameID && !isExposedTo(t, origin) {
+			continue
 		}
 		out = append(out, t.info())
 	}
+	r.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i]["name"].(string) < out[j]["name"].(string) })
 	r.send(frameID, map[string]any{"kind": "getToolsResponse", "requestId": requestID, "tools": out})
 }

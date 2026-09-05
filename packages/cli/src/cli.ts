@@ -50,14 +50,25 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
-async function connectUpstream(entry: AppRegistryEntry): Promise<Client> {
+async function connectUpstream(entry: AppRegistryEntry, signal?: AbortSignal): Promise<Client> {
+  signal?.throwIfAborted();
   const client = new Client({ name: "webdesktopmcp-cli", version: "0.1.0" });
-  await client.connect(
-    new StreamableHTTPClientTransport(new URL(entry.url), {
-      requestInit: { headers: { authorization: `Bearer ${entry.token}` } },
-    }),
-  );
-  return client;
+  const cancel = () => { void client.close().catch(() => {}); };
+  signal?.addEventListener("abort", cancel, { once: true });
+  client.onclose = () => signal?.removeEventListener("abort", cancel);
+  try {
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(entry.url), {
+        requestInit: { headers: { authorization: `Bearer ${entry.token}` } },
+      }),
+    );
+    signal?.throwIfAborted();
+    return client;
+  } catch (error) {
+    signal?.removeEventListener("abort", cancel);
+    await client.close();
+    throw error;
+  }
 }
 
 async function findApp(appName: string, registryDir?: string, waitSeconds = 5): Promise<AppRegistryEntry> {
@@ -143,12 +154,19 @@ async function main(): Promise<void> {
     return { tools: result.tools };
   });
 
-  downstream.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const result = await upstream.callTool({
-      name: request.params.name,
-      arguments: request.params.arguments ?? {},
-    });
-    return result as typeof result & Record<string, unknown>;
+  downstream.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    // Stateless hosts observe cancellation through the response disconnect.
+    // A dedicated connection lets this call abort without closing other calls.
+    const invocation = await connectUpstream(entry, extra.signal);
+    try {
+      const result = await invocation.callTool({
+        name: request.params.name,
+        arguments: request.params.arguments ?? {},
+      }, undefined, { signal: extra.signal });
+      return result as typeof result & Record<string, unknown>;
+    } finally {
+      await invocation.close();
+    }
   });
 
   downstream.setRequestHandler(PingRequestSchema, async () => ({}));

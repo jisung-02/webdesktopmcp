@@ -1,12 +1,12 @@
 # WebMCP 기술 리서치
 
-> 조사일: 2026-09-03 · 1차 소스 기반 (W3C 스펙 전문, Chrome 공식 문서, 구현 현황 문서, Angular/MCP-B 공식 문서)
+> 최초 조사: 2026-09-03 · 갱신: 2026-09-05. 제안의 설명과 이 저장소의 구현 범위를 구분합니다. 구현의 단일 기준은 [지원 표](docs/support.md)입니다.
 
 ---
 
 ## 1. 한 줄 요약
 
-**WebMCP는 웹페이지를 MCP 서버처럼 동작하게 하는 제안 웹 표준**이다. 사이트가 자신의 기능을 JavaScript 함수(또는 HTML 폼)에 자연어 설명 + JSON Schema를 붙여 "도구(tool)"로 선언하면, 브라우저 내장 에이전트·확장·페이지 내 에이전트가 이를 발견(discovery)하고 호출(invoke)한다. Google과 Microsoft가 공동으로 추진 중이며, **Chrome 149부터 오리진 트라이얼이 진행 중**이다.
+**WebMCP는 웹페이지의 도구를 에이전트에 제공하는 실험적 Community Group API 제안**이다. 2026-09-04 초안은 W3C 표준도 아니며 W3C Standards Track에도 속하지 않는다고 명시한다. 사이트가 자신의 기능을 JavaScript 함수(또는 HTML 폼)에 자연어 설명 + JSON Schema를 붙여 "도구(tool)"로 선언하면, 브라우저 내장 에이전트·확장·페이지 내 에이전트가 이를 발견(discovery)하고 호출(invoke)한다. Google과 Microsoft가 공동으로 추진 중이며, **Chrome 149부터 오리진 트라이얼이 진행 중**이다.
 
 ---
 
@@ -14,11 +14,10 @@
 
 | 항목 | 내용 |
 |---|---|
-| 표준화 장소 | W3C Web Machine Learning Community Group (CG-DRAFT, 아직 정식 권고 아님) |
-| 저장소 | `github.com/webmachinelearning/webmcp` (약 3.7k stars, 137 commits, 116 issues) |
-| 최초 공개 | 2025-08-13, 이후 대폭 개정 (현 스펙 빌드: 2026-08-21) |
-| 후원 기업 | **Google** (David Bokan, Khushal Sagar, Hannah Van Opstal) + **Microsoft** (Brandon Walderman, Leo Lee, Andrew Nolan) |
-| 스펙 주도 | Dominic Farolino (Chrome, Blink 커미터) |
+| 표준화 장소 | W3C Web Machine Learning Community Group (CG-DRAFT, W3C 표준 및 Standards Track 아님) |
+| 저장소 | [공식 저장소](https://github.com/webmachinelearning/webmcp) |
+| 최초 공개 | 현재 확인한 CG 초안: 2026-09-04 |
+| 현재 편집자 | Brandon Walderman (Microsoft), Khushal Sagar 및 Dominic Farolino (Google) |
 | 이론적 배경 | jasonjmcghee/WebMCP (2025년 독립 PoC, 구현 경험으로 크레딧) 및 MCP-B |
 
 초기 독립 프로젝트였던 jasonjmcghee/WebMCP는 localhost WebSocket 브리지를 통해 Claude Desktop/Cursor/Cline/Windsurf 같은 MCP 클라이언트를 웹페이지에 연결하는 방식이었으나, **2026-02 작성자가 "W3C 스펙 미준수(not compliant)"를 명시**하고 공식 스펙 쪽으로 흐름을 넘겼다.
@@ -33,7 +32,7 @@
 - **개발자 부담**: 도구마다 전용 백엔드 엔드포인트를 만들어야 한다.
 
 ### WebMCP의 접근
-- 도구가 **페이지의 가시적인 탭 컨텍스트 안에서 실행**된다 → 사용자가 결과를 눈으로 검증 가능 (human-in-the-loop). 헤드리스 실행은 지원하지 않는다.
+- 도구가 **페이지의 가시적인 탭 컨텍스트 안에서 실행**된다 → 사용자가 결과를 눈으로 검증 가능 (human-in-the-loop). 이러한 UI 중심 설명을 headless 실행 금지 보장으로 해석하면 안 된다. 이 라이브러리도 창 가시성을 강제하지 않는다.
 - 브라우저의 **쿠키/세션을 그대로 상속** → 별도 인증 불필요.
 - 기존 UI/브랜딩 유지한 채 **점진적 향상(progressive enhancement)** 으로 도입 가능.
 - 대안인 "actuation"(스크린샷 보고 클릭/타이핑 시뮬레이션)보다 신뢰성·효율·완료율이 높다.
@@ -61,6 +60,8 @@
 
 ### 5.1 인터페이스
 
+아래는 API 형태를 설명하는 발췌이며 완전한 최신 IDL이나 라이브러리 적합성 선언이 아니다. 등록 해제는 등록용 AbortSignal을 사용한다. `unregisterTool`은 이 라이브러리의 확장 메서드이며 네이티브 API에 있다고 가정하지 않는다.
+
 ```webidl
 [Exposed=Window, SecureContext]
 interface ModelContext : EventTarget {
@@ -82,6 +83,7 @@ dictionary ModelContextTool {
 dictionary ToolAnnotations {
   boolean readOnlyHint = false;        // 상태 변경 없음 힌트
   boolean untrustedContentHint = false; // 출력에 신뢰할 수 없는 콘텐츠 포함 힌트
+  boolean consequentialHint = false; // 중대한 부작용 힌트
 };
 
 callback ToolExecuteCallback = Promise<any> (object inputObject, ToolExecuteCallbackOptions options);
@@ -116,10 +118,12 @@ await document.modelContext.registerTool({
 
 | 메서드 | 대상 | 설명 |
 |---|---|---|
-| `registerTool()` | 사이트 개발자 | 동일 이름 중복, 빈 name/description, 잘못된 inputSchema → reject(`InvalidStateError`). `AbortSignal`로 등록 해제. `exposedTo`로 교차 origin 노출 범위 제어. |
-| `getTools({fromOrigins})` | **페이지 내 에이전트**(iframe JS 등) | 자기 문서 + 자손 문서 중 노출 허용된 도구만 반환. 브라우저 내장 에이전트는 이 API를 쓰지 않고 별도 내부 경로 사용. |
+| `registerTool()` | 사이트 개발자 | 등록 이름·메타데이터의 조건과 실패 유형은 초안 및 런타임 버전에 따라 확인해야 한다. `AbortSignal`로 등록 해제. `exposedTo`로 교차 origin 노출 범위 제어. |
+| `getTools({fromOrigins})` | **페이지 내 에이전트**(iframe JS 등) | 자기 문서·동일 origin 도구는 항상 포함하고, `fromOrigins`는 추가로 조회할 외부 origin을 지정한다. 외부 도구는 요청된 origin에 속하면서 `exposedTo`가 호출 origin을 허용해야 한다. 브라우저 내장 에이전트는 이 API를 쓰지 않고 별도 내부 경로 사용. |
 | `executeTool(tool, input, {signal})` | 페이지 내 에이전트 | 도구가 등록된 문서에서 실행되고 **JSON 문자열화된 결과**를 반환. 같은 traversable 내에서만 가능 (최상위 문서 간 실행은 이슈 #227로 미지원). `AbortSignal`로 취소. |
 | `toolchange` | 모두 | 도구 등록/해제 시 해당 도구가 노출되는 문서들에 발화. |
+
+네이티브 `RegisteredTool.window`와 데스크톱의 `frameId` 라우팅 확장은 구분해야 한다. 조회 `getTools`의 AbortSignal은 라이브러리 확장이고, 실행 옵션은 실행용 signal을 사용한다.
 
 ### 5.4 Declarative API (HTML 폼 어노테이션)
 
@@ -147,7 +151,7 @@ await document.modelContext.registerTool({
 - `SecureContext` 전용, `Window` 전용.
 - **origin-keyed agent cluster 필수** — `document.domain`이 활성화되면(예: `Origin-Agent-Cluster: ?0`) API 비활성화(`SecurityError`).
 - **Permissions Policy `"tools"`**, 기본 allowlist `'self'` — 교차 origin iframe은 `allow="tools"`를 명시해야 등록/조회/실행 가능.
-- 도구 실행은 **가시 탭에서만**, headless·보조 도구 불가.
+- 공유 UI가 주요 사용 맥락이지만 이 브리지는 창의 가시성이나 headless 금지를 강제하지 않는다.
 - 민감 작업(구매 등)은 **확인 다이얼로그**(사용자 상호작용 요구)를 UA가 요구할 수 있음.
 
 **위협 모델 (스펙 §6 — 에이전트의 기본 능력을 전제)**
@@ -165,18 +169,17 @@ await document.modelContext.registerTool({
 
 ---
 
-## 7. 구현 현황 (2026-09 기준)
+## 7. 구현 현황 (2026-09-05 확인)
 
-| 구현체 | 상태 |
+| 구현체 | 확인한 공식 자료 및 해석 |
 |---|---|
-| **Chrome** | **Origin Trial 라이브 (v149부터)**. `chrome://flags/#enable-webmcp-testing` 로컬 테스트 플래그. blink-dev Intent to Experiment, Chrome Status feature 5117755740913664. |
-| **Edge** | **Origin Trial 라이브 (v150)**, Chrome과 플랫폼 지원 동일 |
-| **Brave** | Leo AI 채팅에 실험적 지원 |
-| **Firefox / Safari** | 표준 포지션 검토 중만 (Mozilla #1412 / WebKit #670), 구현 없음 |
-| **ChatGPT Desktop** | **WebMCP 지원** (구현 현황 문서 명시) |
-| **Angular v22** | 실험적 지원: `provideExperimentalWebMcpTools`, `declareExperimentalWebMcpTool`, `provideExperimentalWebMcpForms`(Signal Forms에서 스키마 자동 추론 + 검증 오류를 에이전트에 되돌려 셀프수정 유도), `withExperimentalAutoCleanupInjectors`(라우트 이동 시 도구 자동 해제) |
-| 도구/테스트 | **Model Context Tool Inspector** 확장(도구 모니터링·수동 호출·스키마 검증·자연어 구동, 기본 모델 gemini-3-flash-preview), `@mcp-b/webmcp-polyfill` 목/폴리필 |
-| 데모 | `GoogleChromeLabs/webmcp-tools` (zaMaker 피자 메이커, React 항공 검색, Le Petit Bistro 선언형) |
+| Chrome | [공식 문서](https://developer.chrome.com/docs/ai/webmcp)는 149부터 origin trial을 안내한다. |
+| Electron | [Electron 44 공식 발표](https://www.electronjs.org/blog/electron-44-0): 2026-08-25 출시, Chromium 152 포함. 모든 Electron이 149 미만이라는 설명은 틀리다. |
+| webdesktopmcp | 실제 메서드를 기능 감지해 네이티브 미러/부분 폴리필을 선택하는 실험적 데스크톱 브리지. 버전이나 플래그만으로 호환성을 보장하지 않는다. |
+
+다른 브라우저·에이전트·프레임워크의 지원 여부는 해당 제품의 최신 공식 문서를 확인해야 한다. 최초 조사에서 수집한 생태계 자료는 아래 참고 링크에 남기며, 현재 지원 보장으로 인용하지 않는다.
+
+폴리필은 Electron·Tauri·Wails에서 공통 TypeScript 코어와 선언형 폼 부분집합을 사용한다. 네이티브 모드는 설치 이후 명령형 `registerTool` 호출을 미러링하며 **네이티브 선언형 폼을 외부 MCP에 미러링하지 않는다**. 두 경로의 전체 동작이 동일하다는 보장은 없다.
 
 ---
 
@@ -194,7 +197,7 @@ await document.modelContext.registerTool({
 
 | | 백엔드 MCP 서버 | WebMCP |
 |---|---|---|
-| 실행 위치 | 원격 서버/프로세스 (stdio/SSE) | 사용자의 가시 탭 안 (페이지 JS) |
+| 실행 위치 | 원격 서버/프로세스 (stdio/SSE) | 페이지 문서의 JavaScript 실행 환경 |
 | 인증 | 서버가 별도 구현 | 브라우저 세션/쿠키 상속 |
 | UI 관계 | UI 우회(disintermediation) | UI 공유, human-in-the-loop |
 | 상태 | 서버가 복제 | 페이지가 이미 보유 |
@@ -208,16 +211,19 @@ await document.modelContext.registerTool({
 
 ---
 
-## 10. 시사점 및 전망
+## 10. 프로젝트 적용 시사점
 
-1. **모멘텀은 실재함**: CG 드래프트 단위를 넘어 Chromium(149)+Edge(150) 오리진 트라이얼, ChatGPT Desktop 지원, Angular 실험 API까지 — "웹을 에이전트에 노출하는 1급 인터페이스"가 2026년에 사실상 표준 트랙에 올랐다. Firefox/Safari의 반응이 관건.
-2. **"Actuation 스크래핑"의 구조적 대체**: DOM/스크린샷 추측이 아니라 사이트가 의도를 선언 → 에이전트 신뢰성 문제의 정답에 가까운 방향. 단, 스펙 스스로 인정하듯 **프롬프트 인젝션과 의도 왜곡은 프로토콜이 아니라 에이전트/UA 측 방어에 의존**한다.
-3. **프레임워크 계층이 먼저 붙는 패턴**: Angular(폼→스키마 자동 추론)처럼 선언형 API가 자리 잡으면 React/Vue 바인딩(MCP-B가 선도)이 표준처럼 쓰일 것.
-4. **프로젝트 적용 제안 (`webdesktopmcp`)**: 데스크톱 앱/에이전트에서 웹 자동화를 하려면 (a) 당장은 CDP/actuation 기반, (b) Chrome/Edge 대상이라면 폴리필+플래그로 WebMCP 도구를 소비, (c) 자체 웹 UI가 있다면 `document.modelContext.registerTool`로 도구를 노출해 에이전트와의 계약을 명시화하는 3단계 접근이 합리적이다. `@mcp-b/webmcp-polyfill`로 미지원 브라우저 폴백이 가능하다.
+1. **초안과 구현을 구분**: origin trial과 생태계 실험은 W3C Standards Track 진입이나 라이브러리 전체 적합성의 증거가 아니다. 실제 배포할 런타임에서 확인해야 한다.
+2. **명시적 도구 계약**: 기존 UI와 로직을 재사용하는 도구는 유용하지만, 프롬프트 인젝션과 설명·부작용 불일치에 대한 방어는 앱과 에이전트가 수행해야 한다.
+3. **외부 MCP와 브라우저 경계**: 이 라이브러리는 로컬 bearer 인증 MCP 서버를 추가한다. 비어 있지 않은 `exposedTo`는 외부 조회·호출을 막는 라이브러리 정책이며 외부 클라이언트를 브라우저 origin으로 인증하는 기능이 아니다. Tauri webview URL과 Wails frameId는 완전한 DOM iframe 신원 보장을 제공하지 않는다.
+4. **입력 및 취소**: 브리지는 JSON Schema `required`/`type` 런타임 검증을 제공하지 않는다. 도구가 입력·권한을 검증하고 실행 취소 신호를 관찰해야 한다. HTTP 별도 요청의 `notifications/cancelled`는 활성 호출과 연결하지 않으므로 모든 클라이언트 취소가 전파된다고 가정하면 안 된다.
+5. **검증 범위**: 로컬 자동 테스트와 실제 Electron 폴리필 smoke는 각각 해당 경로의 증거다. 공식 WPT 적합성이나 모든 플랫폼의 네이티브 GUI 검증은 주장하지 않는다. [지원 표](docs/support.md)와 [보안 모델](docs/security.md)를 참고한다.
 
 ---
 
 ## 참고 자료
+
+이번 갱신·수정에 사용한 공식 출처와 코드·테스트 연결은 [레퍼런스와 적용 근거](docs/references.md)에 정리했습니다. 아래 생태계·역사 자료는 현재 사양이나 프로젝트 지원 범위의 보증이 아닙니다.
 
 - 스펙 (CG-DRAFT): https://webmachinelearning.github.io/webmcp/
 - GitHub explainer: https://github.com/webmachinelearning/webmcp

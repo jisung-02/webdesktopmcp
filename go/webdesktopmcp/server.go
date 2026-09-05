@@ -24,7 +24,7 @@
 //	// 4. Call mcp.FrameGone(windowName) when a window closes.
 //
 // Deviations from docs/protocol.md and the TS reference are documented on the
-// relevant symbols (stale-frame session pruning, `_origin`/`_session` fields).
+// relevant symbols (stale-frame session pruning and trusted frame provenance).
 package webdesktopmcp
 
 import (
@@ -204,11 +204,10 @@ func (s *Server) getConfirm() func(toolName string, input map[string]any) bool {
 	return s.confirm
 }
 
-// SetFrameOrigin stamps the origin used for tools registered by a frame (host
-// obligation #2 in docs/protocol.md). This is the authoritative mechanism; the
-// register message's optional `_origin` field (sent by the bundled bootstrap
-// from location.origin) is a page-provided fallback — whichever was set last
-// for the frame wins.
+// SetFrameOrigin sets trusted host provenance. Renderer-provided origins are ignored.
+// Wails bindings do not authenticate frameID: bind Send only for trusted pages,
+// or route through a native wrapper that supplies an authenticated frame ID.
+// Frames with unknown origins cannot access tools owned by other frames.
 func (s *Server) SetFrameOrigin(frameID, origin string) {
 	s.reg.SetFrameOrigin(frameID, origin)
 }
@@ -224,9 +223,8 @@ func (s *Server) sendToFrame(frameID string, msg map[string]any) {
 	s.mu.RLock()
 	emit := s.emitter
 	s.mu.RUnlock()
-	// frameID is implicit: the bootstrap filters by ownership (execute ids
-	// embed the target frame, replies are matched against per-frame pending
-	// maps), so Wails' broadcast-style EventsEmit stays correct.
+	msg = cloneMap(msg)
+	msg["_frameId"] = frameID
 	emit("webdesktopmcp:message", msg)
 }
 
@@ -258,11 +256,6 @@ func (s *Server) Send(frameID string, message map[string]any) map[string]any {
 		if invocationID == "" {
 			return ackErr(`register requires "invocationId"`)
 		}
-		// Origin stamping: `_origin` (page-provided via location.origin) is the
-		// fallback; SetFrameOrigin is the authoritative host-side mechanism.
-		if o, ok := message["_origin"].(string); ok && o != "" {
-			s.reg.SetFrameOrigin(frameID, o)
-		}
 		tool, _ := message["tool"].(map[string]any) // nil → registerResult(ok:false)
 		session, _ := message["_session"].(string)
 		s.reg.handleRegister(frameID, invocationID, tool, toStringSlice(message["exposedTo"]), session)
@@ -282,7 +275,7 @@ func (s *Server) Send(frameID string, message map[string]any) map[string]any {
 		result, _ := message["result"].(string)
 		errorCode, _ := message["errorCode"].(string)
 		errorMessage, _ := message["errorMessage"].(string)
-		s.reg.handleExecuteResult(invocationID, ok, result, errorCode, errorMessage)
+		s.reg.handleExecuteResult(frameID, invocationID, ok, result, errorCode, errorMessage)
 		return ackOK()
 
 	case "executeForward":
@@ -291,8 +284,15 @@ func (s *Server) Send(frameID string, message map[string]any) map[string]any {
 		if requestID == "" || name == "" {
 			return ackErr(`executeForward requires "requestId" and "name"`)
 		}
-		fromOrigin, _ := message["fromOrigin"].(string)
-		s.reg.handleExecuteForward(frameID, requestID, name, message["input"], fromOrigin)
+		s.reg.handleExecuteForward(frameID, requestID, name, message["input"])
+		return ackOK()
+
+	case "cancelForward":
+		requestID, _ := message["requestId"].(string)
+		if requestID == "" {
+			return ackErr("cancelForward requires requestId")
+		}
+		s.reg.handleCancelForward(frameID, requestID)
 		return ackOK()
 
 	case "getToolsRequest":
@@ -300,8 +300,7 @@ func (s *Server) Send(frameID string, message map[string]any) map[string]any {
 		if requestID == "" {
 			return ackErr(`getToolsRequest requires "requestId"`)
 		}
-		forOrigin, _ := message["forOrigin"].(string)
-		s.reg.handleGetToolsRequest(frameID, requestID, forOrigin, toStringSlice(message["fromOrigins"]))
+		s.reg.handleGetToolsRequest(frameID, requestID, toStringSlice(message["fromOrigins"]))
 		return ackOK()
 
 	case "toolRemoved":
