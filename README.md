@@ -1,13 +1,13 @@
 # webdesktopmcp
 
-**Turn desktop apps (Electron · Tauri · Wails) into WebMCP servers.**
+**An experimental desktop WebMCP-to-MCP bridge for Electron, Tauri, and Wails.**
 
 English | [한국어](README.ko.md) | [日本語](README.ja.md) | [中文](README.zh.md) | [Français](README.fr.md) | [Español](README.es.md)
 
-With a few lines of code, desktop app developers can expose their app's features as **tools for AI agents** (Claude Desktop, Claude Code, Cursor, ChatGPT Desktop, …). Your page code uses the standard [W3C WebMCP draft](https://webmachinelearning.github.io/webmcp/) API (`document.modelContext`) as-is — and the library automatically switches to the real native API when the runtime ships it.
+Expose page functions as tools to external MCP clients over a local authenticated endpoint. The page API follows a subset of the [WebMCP Community Group draft](https://webmachinelearning.github.io/webmcp/). The 4 September 2026 draft is **neither a W3C Standard nor on the W3C Standards Track**. This library does not claim full browser conformance. The [support matrix](docs/support.md) is the source of truth for supported behavior and verification scope.
 
 ```ts
-// App code — the standard W3C WebMCP API, unchanged
+// Page tool registration — experimental WebMCP draft API
 document.modelContext.registerTool({
   name: "search-orders",
   description: "Search orders by order number or customer name",
@@ -29,24 +29,19 @@ document.modelContext.registerTool({
 
 ## How it works
 
-Desktop webviews don't ship the native WebMCP API yet (Electron's Chromium is below 149; Tauri uses WKWebView/WebView2), so the library bridges three layers:
+The bridge connects page registrations to an external MCP transport:
 
 ```
-[Page inside the webview]
-  document.modelContext.registerTool(...)     ← polyfill or native mirror (same API)
-        │  IPC — wire protocol in docs/protocol.md
-        ▼
-[Native host]  Electron main / Tauri (Rust) / Wails (Go)
-  Tool registry + local MCP server (127.0.0.1, bearer token)
-        │
-        ├─ Streamable HTTP   ← Cursor, Claude Code, … connect directly
-        └─ @webdesktopmcp/cli (stdio shim) ← Claude Desktop, …
+Page: document.modelContext.registerTool(...)
+  → shared page polyfill or native registration mirror
+  → host IPC (Electron / Tauri / Wails)
+  → local tool registry and MCP server (127.0.0.1, bearer token)
+  → HTTP MCP client or @webdesktopmcp/cli stdio shim
 ```
 
-**Native-first version gate** — the Electron adapter checks `process.versions.chrome`:
+Native mode is selected by feature detection of the required `document.modelContext` methods; a Chromium version or feature flag does not guarantee availability or draft compatibility. Electron may request the experimental feature flag on eligible versions. [Electron 44 already includes Chromium 152](https://www.electronjs.org/blog/electron-44-0), while [Chrome documents an origin trial starting in 149](https://developer.chrome.com/docs/ai/webmcp).
 
-- **Chromium ≥ 149** → enables native WebMCP via the `--enable-blink-features=WebMCP` switch. The page uses the **real native `document.modelContext`**; the adapter only wraps `registerTool` transparently to mirror registrations out to external agents (built-in browser agents keep using the native path).
-- **Below 149** (everything today) → injects a polyfill implementing the W3C semantics. The switch is automatic — no app code changes.
+The native mirror observes imperative `registerTool` calls made after installation. Native browser declarative forms are **not mirrored to external MCP clients**. Polyfill mode provides the library's declarative form subset on all three adapters. Browser Permissions Policy, origin isolation, and native-agent behavior are not reproduced in full; see the [support matrix](docs/support.md).
 
 ## Packages
 
@@ -55,7 +50,7 @@ Desktop webviews don't ship the native WebMCP API yet (Electron's Chromium is be
 | [`@webdesktopmcp/protocol`](packages/protocol) | TS | Wire protocol shared by the TS/Rust/Go hosts ([spec](docs/protocol.md)) |
 | [`@webdesktopmcp/core`](packages/core) | TS | `document.modelContext` polyfill + native mirror + declarative form API |
 | [`@webdesktopmcp/server`](packages/server) | TS | Framework-agnostic local MCP server + app registry |
-| [`@webdesktopmcp/electron`](packages/electron) | TS | Electron adapter (auto preload injection, version gate, confirmation hook) |
+| [`@webdesktopmcp/electron`](packages/electron) | TS | Electron adapter (auto preload injection, feature detection, confirmation hook) |
 | [`@webdesktopmcp/cli`](packages/cli) | TS | `webdesktopmcp connect --app <name>` stdio shim |
 | `crates/tauri-plugin-webdesktopmcp` | Rust | Tauri v2 plugin |
 | `go/webdesktopmcp` | Go | Wails v2 package |
@@ -81,7 +76,7 @@ const win = new BrowserWindow({
 });
 ```
 
-In the renderer, just use the standard `document.modelContext.registerTool` code shown above. For typed inputs, use the `defineTool` helper from `@webdesktopmcp/core` (the object it returns is a plain `ModelContextTool` — input types are inferred inside `execute`):
+In the renderer, just use the `document.modelContext.registerTool` code shown above. For typed inputs, use the `defineTool` helper from `@webdesktopmcp/core` (the object it returns is a plain `ModelContextTool` — input types are inferred inside `execute`):
 
 ```ts
 import { defineTool } from "@webdesktopmcp/core";
@@ -94,7 +89,7 @@ const search = defineTool<{ keyword: string }>({
 });
 ```
 
-While debugging, `window.__webDesktopMcp.listTools()` in DevTools shows everything the page registered, and **declarative form API** is supported too — a form becomes a tool with zero JavaScript:
+While debugging, `window.__webDesktopMcp.listTools()` in DevTools shows everything the page registered, and **polyfill mode supports a declarative form subset** — annotated forms become tools:
 
 ```html
 <form toolname="order-coffee"
@@ -159,19 +154,25 @@ pnpm --filter webdesktopmcp-electron-demo start
 node packages/cli/dist/cli.js list
 ```
 
-The demo app (`examples/electron-demo`) exposes 4 imperative tools plus a declarative form tool (`order-coffee`). From Claude Desktop, try *"show me open tasks"* or *"order a latte with 2 shots"*.
+The demo app (`examples/electron-demo`) includes imperative tools and, in polyfill mode, a declarative form tool (`order-coffee`). From Claude Desktop, try *"show me open tasks"* or *"order a latte with 2 shots"*.
 
 ## Verification status
 
-- `@webdesktopmcp/core` — vitest **19/19** (polyfill semantics, declarative forms, native mirror)
-- `@webdesktopmcp/server` — vitest **9/9** (registry, HTTP MCP initialize/list/call, auth, exposure filter, confirmation hook)
-- Electron demo — **verified end-to-end in a real app**: launch → preload injection → 5 tools registered → `tools/call` over HTTP for imperative and declarative tools → also invoked through the CLI stdio shim
-- Tauri (Rust) / Wails (Go) — verified via `cargo check`/`go build` and their test suites (see each directory's README)
+As of 2026-09-05, repository checks cover the shared page implementation, native-shaped fixtures, host authorization/HTTP behavior, React lifecycle, and adapter source/build checks. These are local automated checks; they do not establish official Web Platform Tests conformance or end-to-end native GUI coverage for every platform. A real Electron 38.8.6 / Chromium 140.0.7339.249 polyfill integration smoke passed on 2026-09-05; its exact scope and rerun command are recorded in the [support document](docs/support.md#recorded-electron-integration-run). This does not verify the native WebMCP path.
 
-## Relation to the WebMCP standard
+```bash
+pnpm install
+pnpm build
+pnpm test
+pnpm typecheck
+(cd go/webdesktopmcp && go test ./...)
+(cd crates/tauri-plugin-webdesktopmcp && cargo test)
+```
 
-This library brings the page-side API of the [W3C WebMCP CG draft](https://webmachinelearning.github.io/webmcp/) ([repo](https://github.com/webmachinelearning/webmcp); origin trial in Chrome 149 / Edge 150) to desktop webviews. The original proof of concept is [jasonjmcghee/WebMCP](https://github.com/jasonjmcghee/WebMCP); MCP-B ([site](https://mcp-b.ai)) builds ecosystem tooling. The underlying technical research (Korean): [webmcp-research.md](webmcp-research.md).
+Consult [support and verification scope](docs/support.md), [security](docs/security.md), and the updated [research notes (Korean)](webmcp-research.md) before integrating the experimental bridge.
 
 ## License
 
 MIT
+
+[References and implementation evidence](docs/references.md)

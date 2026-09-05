@@ -858,3 +858,60 @@ func TestNewValidation(t *testing.T) {
 		}
 	})
 }
+
+func TestStructuredContentRequiresObject(t *testing.T) {
+	for _, value := range []string{"1", "true", `"text"`, "null", "[]"} {
+		t.Run(value, func(t *testing.T) {
+			env := newTestServer(t)
+			mustRegister(t, env, "a", "result", nil)
+			env.s.SetEventEmitter(func(_ string, data ...interface{}) {
+				m := data[0].(map[string]any)
+				if m["kind"] == "execute" {
+					env.s.Send("a", map[string]any{"kind": "executeResult", "invocationId": m["invocationId"], "ok": true, "result": value})
+				}
+			})
+			_, body := postMCP(t, env.s, "tools/call", map[string]any{"name": "result"})
+			result := body["result"].(map[string]any)
+			if _, present := result["structuredContent"]; present {
+				t.Fatalf("non-object structuredContent: %v", result)
+			}
+		})
+	}
+}
+
+func TestToolsListPreservesWebAnnotations(t *testing.T) {
+	env := newTestServer(t)
+	mustRegister(t, env, "a", "annotated", func(m map[string]any) {
+		m["tool"].(map[string]any)["annotations"] = map[string]any{"readOnlyHint": true, "custom": map[string]any{"role": "preview"}}
+	})
+	_, body := postMCP(t, env.s, "tools/list", nil)
+	tool := body["result"].(map[string]any)["tools"].([]any)[0].(map[string]any)
+	meta := tool["_meta"].(map[string]any)
+	ann, ok := meta["webdesktopmcp/annotations"].(map[string]any)
+	if !ok || ann["readOnlyHint"] != true || ann["custom"].(map[string]any)["role"] != "preview" {
+		t.Fatalf("annotations lost: %v", meta)
+	}
+	if tool["annotations"].(map[string]any)["readOnlyHint"] != true {
+		t.Fatal("standard hint missing")
+	}
+}
+
+func TestConfirmationCannotBypassUpdatedExposure(t *testing.T) {
+	env := newTestServer(t)
+	mustRegister(t, env, "a", "work", nil)
+	env.s.reg.setTimeout(time.Millisecond)
+	env.s.SetConfirmHook(func(string, map[string]any) bool {
+		mustRegister(t, env, "a", "work", func(m map[string]any) { m["exposedTo"] = []string{"http://trusted"} })
+		return true
+	})
+	_, body := postMCP(t, env.s, "tools/call", map[string]any{"name": "work"})
+	result := body["result"].(map[string]any)
+	if result["isError"] != true {
+		t.Fatalf("restricted tool call succeeded: %v", result)
+	}
+	for _, m := range env.rec.snapshot() {
+		if m["kind"] == "execute" {
+			t.Fatal("restricted tool dispatched after confirmation")
+		}
+	}
+}

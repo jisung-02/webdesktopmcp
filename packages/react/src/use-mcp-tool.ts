@@ -50,7 +50,6 @@ export function useMcpTool<TInput extends Record<string, unknown> = Record<strin
     const mc = (document as unknown as Record<string, unknown>).modelContext as
       | {
           registerTool(tool: unknown, options?: unknown): Promise<undefined>;
-          unregisterTool(name: string): Promise<void>;
         }
       | undefined;
     if (!mc || typeof mc.registerTool !== "function") {
@@ -93,11 +92,6 @@ export function useMcpTool<TInput extends Record<string, unknown> = Record<strin
 
     return () => {
       disposed = true;
-      // Spec semantics: aborting the registration signal unregisters the
-      // tool. Prefer the explicit extension API, fall back to the signal.
-      void mc.unregisterTool(definition.name).catch(() => {
-        controller.abort();
-      });
       controller.abort();
     };
     // Re-register only when the tool identity changes.

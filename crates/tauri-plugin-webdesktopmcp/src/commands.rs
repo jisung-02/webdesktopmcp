@@ -15,11 +15,11 @@ use crate::rpc::RpcCore;
 use crate::{deliver, notify_change, PluginState};
 
 #[tauri::command]
-pub(crate) async fn send(
-    window: tauri::WebviewWindow<Wry>,
-    message: Value,
-) -> Result<(), String> {
+pub(crate) async fn send(window: tauri::Webview<Wry>, message: Value) -> Result<(), String> {
     let app = window.app_handle().clone();
+    if app.get_webview_window(window.label()).is_none() {
+        return Err("webdesktopmcp supports WebviewWindow callers only".into());
+    }
     let (registry, core) = {
         let Some(state) = app.try_state::<PluginState>() else {
             return Ok(());
@@ -27,8 +27,10 @@ pub(crate) async fn send(
         (state.registry.clone(), state.core.clone())
     };
     let frame = window.label().to_string();
-    let origin =
-        messages::normalize_origin(&window.url().map(|url| url.to_string()).unwrap_or_default());
+    let url = window
+        .url()
+        .map_err(|error| format!("Cannot identify calling webview origin: {error}"))?;
+    let origin = messages::normalize_origin(url.as_str());
     handle_renderer_message(&app, &registry, &core, &frame, &origin, message).await;
     Ok(())
 }
@@ -97,6 +99,7 @@ async fn handle_renderer_message(
             error_message,
         } => {
             registry::lock(registry).handle_execute_result(
+                frame,
                 &invocation_id,
                 ok,
                 result.as_deref(),
@@ -109,10 +112,9 @@ async fn handle_renderer_message(
             request_id,
             name,
             input,
-            from_origin,
         } => {
             let started =
-                registry::lock(registry).begin_forward(frame, &request_id, &name, input, &from_origin);
+                registry::lock(registry).begin_forward(frame, &request_id, &name, input, origin);
             let started = match started {
                 Ok(started) => started,
                 Err(reply) => {
@@ -138,7 +140,13 @@ async fn handle_renderer_message(
                     deliver(
                         app,
                         frame,
-                        &messages::execute_forward_result(&request_id, true, Some(&result), None, None),
+                        &messages::execute_forward_result(
+                            &request_id,
+                            true,
+                            Some(&result),
+                            None,
+                            None,
+                        ),
                     );
                 }
                 ForwardOutcome::Done(Err(message)) => {
@@ -174,28 +182,23 @@ async fn handle_renderer_message(
             }
         }
 
+        RendererMessage::CancelForward { request_id } => {
+            let cancelled = registry::lock(registry).cancel_forward(frame, &request_id);
+            if let Some((owner, invocation)) = cancelled {
+                deliver(app, &owner, &messages::abort_message(&invocation));
+            }
+        }
+
         RendererMessage::GetToolsRequest {
             request_id,
             from_origins,
-            for_origin,
         } => {
             let response = {
                 let mut reg = registry::lock(registry);
-                reg.note_frame_origin(frame, &for_origin);
+                reg.note_frame_origin(frame, origin);
                 let tools: Vec<Value> = reg
-                    .list()
+                    .list_for_origin(origin, from_origins.as_deref())
                     .into_iter()
-                    .filter(|tool| {
-                        if tool.frame_id == frame {
-                            return true; // own tools are always visible
-                        }
-                        if let Some(from) = &from_origins {
-                            if !from.is_empty() && !from.iter().any(|o| o == &tool.origin) {
-                                return false;
-                            }
-                        }
-                        tool.is_exposed_to(&for_origin)
-                    })
                     .map(|tool| tool.to_wire())
                     .collect();
                 messages::get_tools_response(&request_id, &tools)

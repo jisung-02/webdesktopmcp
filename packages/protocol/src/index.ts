@@ -12,7 +12,7 @@
 /** Global name exposed on `window` by every adapter's preload/initialisation script. */
 export const HOST_BRIDGE_GLOBAL = "__webDesktopMcpHost" as const;
 
-/** Protocol version. Bump on breaking wire changes; hosts reject mismatches. */
+/** Wire format version. Host and page bundle must be updated together; no version negotiation. */
 export const PROTOCOL_VERSION = 1;
 
 // ---------------------------------------------------------------------------
@@ -24,6 +24,7 @@ export interface ToolAnnotations {
   readOnlyHint?: boolean;
   /** Hint: tool output may contain content an agent must not treat as instructions. */
   untrustedContentHint?: boolean;
+  consequentialHint?: boolean;
 }
 
 export interface JsonSchemaObject {
@@ -51,7 +52,7 @@ export interface RegisteredToolInfo extends ToolDeclaration {
   origin: string;
   /** Host-assigned frame/webview label (e.g. Electron `webContents.id`, Tauri webview label). */
   frameId: string;
-  /** Origins the tool is restricted to (from `registerTool` `exposedTo`). */
+  /** Additional page origins permitted by `registerTool` `exposedTo`. */
   exposedTo?: string[];
 }
 
@@ -158,6 +159,7 @@ export type RendererMessage =
   | RegisterToolMessage
   | UnregisterToolMessage
   | ExecuteResultMessage
+  | { kind: "cancelForward"; requestId: string }
   | ExecuteForwardRequestMessage
   | GetToolsRequestMessage
   | ToolRemovedNoticeMessage
@@ -248,8 +250,7 @@ export function validateToolDeclaration(decl: unknown): ToolDeclaration {
 
 /**
  * Each running desktop app writes its endpoint here so stdio shims can find it.
- * Location: `<userData>/webdesktopmcp/registry.json` (Electron) or an
- * OS-equivalent per-platform path resolved by `registryFilePath()`.
+ * Location: `~/.webdesktopmcp/registry.json`, shared by the three hosts.
  */
 export interface AppRegistryEntry {
   /** User-facing app name (also the shim lookup key). */

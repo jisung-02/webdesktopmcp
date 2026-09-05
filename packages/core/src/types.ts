@@ -1,6 +1,5 @@
 /**
- * Public API types mirroring the W3C WebMCP draft so developer code written
- * against the spec types compiles unchanged against this polyfill.
+ * Public types for the supported WebMCP draft subset and desktop extensions.
  */
 
 import type { JsonSchemaObject, ToolAnnotations } from "@webdesktopmcp/protocol";
@@ -28,21 +27,20 @@ export interface ModelContextTool {
 }
 
 export interface ModelContextRegisterToolOptions {
-  /** Restrict exposure to these origins (default: all agents served by the host). */
+  /** Additional page origins allowed to access the tool. Nonempty lists also reserve it for page clients on the desktop host. */
   exposedTo?: (string | URL)[];
   /** Aborting unregisters the tool (spec behaviour). */
   signal?: AbortSignal;
 }
 
 export interface ModelContextGetToolOptions {
-  /** Only return tools from these origins. */
+  /** Additional origins to query, alongside same-origin tools. */
   fromOrigins?: (string | URL)[];
+  /** Desktop extension: cancel this discovery request. */
   signal?: AbortSignal;
 }
 
 export interface ModelContextExecuteToolOptions {
-  /** Only match tools registered by these origins. */
-  fromOrigins?: (string | URL)[];
   signal?: AbortSignal;
 }
 

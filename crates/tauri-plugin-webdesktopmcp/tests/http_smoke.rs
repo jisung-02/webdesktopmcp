@@ -10,12 +10,6 @@ use tauri_plugin_webdesktopmcp::registry::{self, Registry};
 use tauri_plugin_webdesktopmcp::rpc::{FrameSink, RpcCore};
 use tauri_plugin_webdesktopmcp::server;
 
-struct NullSink;
-
-impl FrameSink for NullSink {
-    fn send_to_frame(&self, _frame: &str, _message: &Value) {}
-}
-
 struct RecordingSink {
     messages: Mutex<Vec<(String, Value)>>,
 }

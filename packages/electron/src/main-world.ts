@@ -7,18 +7,18 @@ import { bootstrapWebDesktopMcp } from "@webdesktopmcp/core";
 
 const w = window as unknown as Record<string, unknown>;
 const bridge = w.__webDesktopMcpHost as
-  | { send(m: unknown): void; onMessage(h: (m: unknown) => void): () => void }
+  | { native?: "auto" | "force-polyfill"; send(m: unknown): void; onMessage(h: (m: unknown) => void): () => void }
   | undefined;
 
 // Idempotence: duplicate preload runs must not bootstrap twice.
 if (bridge && typeof document !== "undefined" && !w.__webDesktopMcpBootstrapped) {
   w.__webDesktopMcpBootstrapped = true;
-  bootstrapWebDesktopMcp({
+  const handle = bootstrapWebDesktopMcp({
     bridge,
     frameId: "electron",
     appName: (window as unknown as Record<string, string>).__WEBDESKTOPMCP_APP_NAME ?? "electron-app",
     appVersion: "0",
-    native: "auto",
+    native: bridge.native ?? "auto",
     log: (level, message) => {
       // eslint-disable-next-line no-console
       console[level === "debug" ? "debug" : level](
@@ -28,4 +28,5 @@ if (bridge && typeof document !== "undefined" && !w.__webDesktopMcpBootstrapped)
       );
     },
   });
+  window.addEventListener("pagehide", () => handle?.dispose(), { once: true });
 }

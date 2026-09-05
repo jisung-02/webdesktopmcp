@@ -304,3 +304,84 @@ describe("declarative forms", () => {
     await vi.waitFor(() => expect(host.last("unregister")).toMatchObject({ name: "temp-tool" }));
   });
 });
+
+
+describe("registration and invocation lifetime regressions", () => {
+  it("rolls back an in-flight registration when its signal aborts", async () => {
+    install();
+    const controller = new AbortController();
+    const p = document.modelContext.registerTool(makeTool("pending"), { signal: controller.signal });
+    const reg = host.last("register")!;
+    const rejected = expect(p).rejects.toMatchObject({ name: "AbortError" });
+    controller.abort();
+    await rejected;
+    expect(host.last("unregister")).toMatchObject({ name: "pending" });
+    ackRegister(reg.invocationId as string);
+    expect(installed!.registeredToolNames).not.toContain("pending");
+  });
+
+  it("does not send requests for pre-aborted operations", async () => {
+    install();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(document.modelContext.executeTool({ name: "write" }, {}, { signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" });
+    await expect(document.modelContext.getTools({ signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" });
+    await expect(document.modelContext.registerTool(makeTool(), { signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" });
+    expect(host.sent).toHaveLength(0);
+  });
+
+  it("cancels a forwarded execution at the host", async () => {
+    install();
+    const controller = new AbortController();
+    const p = document.modelContext.executeTool({ name: "write" }, {}, { signal: controller.signal });
+    const request = host.last("executeForward")!;
+    const rejected = expect(p).rejects.toMatchObject({ name: "AbortError" });
+    controller.abort();
+    await rejected;
+    expect(host.last("cancelForward")).toMatchObject({ requestId: request.requestId });
+  });
+
+  it("does not let an old registration signal remove its replacement", async () => {
+    install();
+    const old = new AbortController();
+    const first = document.modelContext.registerTool(makeTool("reused"), { signal: old.signal });
+    ackRegister(host.last("register")!.invocationId as string);
+    await first;
+    await document.modelContext.unregisterTool("reused");
+    const next = document.modelContext.registerTool(makeTool("reused"));
+    ackRegister(host.last("register")!.invocationId as string);
+    await next;
+    old.abort();
+    expect(installed!.registeredToolNames).toContain("reused");
+  });
+
+  it("unregisters owned tools and cancels pending forwarded calls on dispose", async () => {
+    install();
+    const reg = document.modelContext.registerTool(makeTool());
+    ackRegister(host.last("register")!.invocationId as string);
+    await reg;
+    const p = document.modelContext.executeTool({ name: "remote" });
+    const rejected = expect(p).rejects.toMatchObject({ name: "AbortError" });
+    installed!.dispose();
+    installed = null;
+    await rejected;
+    expect(host.last("unregister")).toMatchObject({ name: "greet" });
+    expect(host.last("cancelForward")).toBeDefined();
+  });
+});
+
+
+it("unregisters an in-flight declaration without a late rejection removing its replacement", async () => {
+  install();
+  const first = document.modelContext.registerTool(makeTool("rapid"));
+  const firstId = host.last("register")!.invocationId as string;
+  const firstOutcome = first.catch(error => error);
+  await document.modelContext.unregisterTool("rapid");
+  const second = document.modelContext.registerTool(makeTool("rapid"));
+  const secondId = host.last("register")!.invocationId as string;
+  ackRegister(firstId, false, "old registration rejected");
+  ackRegister(secondId);
+  await second;
+  expect(installed!.registeredToolNames).toContain("rapid");
+  expect(await firstOutcome).toMatchObject({ name: "AbortError" });
+});

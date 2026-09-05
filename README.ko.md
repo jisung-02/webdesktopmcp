@@ -1,13 +1,13 @@
 # webdesktopmcp
 
-**데스크톱 앱(Electron · Tauri · Wails)을 WebMCP 서버로 바꿔주는 라이브러리.**
+**Electron · Tauri · Wails를 위한 실험적 데스크톱 WebMCP-to-MCP 브리지**
 
-[English](README.md) | 한국어 | [日本語](README.ja.md) | [中文](README.zh.md) | [Français](README.fr.md) | [Español](README.es.md)
+[English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [中文](README.zh.md) | [Français](README.fr.md) | [Español](README.es.md)
 
-앱 개발자가 몇 줄만 추가하면, 앱의 기능이 AI 에이전트(Claude Desktop, Claude Code, Cursor, ChatGPT Desktop 등)에게 **도구(tool)로 노출**됩니다. 페이지 코드는 [W3C WebMCP 드래프트](https://webmachinelearning.github.io/webmcp/)의 표준 API(`document.modelContext`)를 그대로 사용하며, 런타임이 네이티브 API를 제공하면 자동으로 실제 네이티브로 전환됩니다.
+페이지 함수를 로컬 MCP 서버와 CLI stdio 연결을 통해 외부 에이전트에 제공합니다. [2026-09-04 WebMCP CG 초안](https://webmachinelearning.github.io/webmcp/)은 W3C 표준도, W3C Standards Track 문서도 아닙니다. 이 라이브러리는 전체 적합성을 주장하지 않습니다.
 
 ```ts
-// 앱 코드 — W3C WebMCP 표준 API 그대로
+// Experimental WebMCP draft API
 document.modelContext.registerTool({
   name: "search-orders",
   description: "주문번호 또는 고객명으로 주문을 검색한다",
@@ -27,26 +27,13 @@ document.modelContext.registerTool({
     "command": "npx", "args": ["-y", "@webdesktopmcp/cli", "connect", "--app", "내앱"] } } }
 ```
 
-## 동작 방식
+## 지원 범위 · 2026-09-05
 
-데스크톱 웹뷰에는 네이티브 WebMCP API가 아직 없습니다(Electron의 Chromium은 149 미만, Tauri는 WKWebView/WebView2 사용). 그래서 라이브러리가 세 계층을 브리징합니다:
+네이티브 모드는 실행 시 `document.modelContext`의 필요한 메서드를 감지해 선택합니다. 버전이나 플래그만으로 제공 여부를 보장하지 않습니다. [Electron 44는 Chromium 152를 포함](https://www.electronjs.org/blog/electron-44-0)하며 [Chrome origin trial은 149부터](https://developer.chrome.com/docs/ai/webmcp)입니다.
 
-```
-[웹뷰 안의 페이지]
-  document.modelContext.registerTool(...)     ← 폴리필 또는 네이티브 미러 (같은 API)
-        │  IPC — docs/protocol.md 와이어 프로토콜
-        ▼
-[네이티브 호스트]  Electron main / Tauri(Rust) / Wails(Go)
-  도구 레지스트리 + 로컬 MCP 서버 (127.0.0.1, Bearer 토큰)
-        │
-        ├─ Streamable HTTP  ← Cursor, Claude Code 등 직접 연결
-        └─ @webdesktopmcp/cli (stdio 셈)  ← Claude Desktop 등
-```
+세 어댑터의 폴리필 모드는 공통 구현과 선언형 폼 부분집합을 제공합니다. 네이티브 모드는 설치 후의 명령형 `registerTool` 호출만 미러링하며 네이티브 선언형 폼은 외부 MCP에 노출하지 않습니다. 두 모드의 동작은 동일하지 않습니다.
 
-**네이티브 우선 버전 게이트** — Electron 어댑터는 `process.versions.chrome`을 검사합니다:
-
-- **Chromium ≥ 149** → `--enable-blink-features=WebMCP` 스위치로 네이티브 WebMCP를 켭니다. 페이지는 **진짜 네이티브 `document.modelContext`**를 사용하고, 어댑터는 `registerTool`만 투명하게 래핑해 등록을 외부 에이전트로 미러링합니다(브라우저 내장 에이전트는 네이티브 경로 그대로).
-- **미만**(현재 전체) → W3C 시맨틱을 구현한 폴리필을 주입합니다. 전환은 자동이며 앱 코드 변경이 없습니다.
+브라우저의 전체 iframe/Permissions Policy를 구현하지 않으며 headless 실행을 금지하지도 않습니다. JSON Schema 입력을 런타임 검증하지 않으므로 도구에서 검증하세요. 비어 있지 않은 `exposedTo`는 외부 조회·호출을 차단하는 라이브러리 정책입니다.
 
 ## 패키지
 
@@ -55,7 +42,7 @@ document.modelContext.registerTool({
 | [`@webdesktopmcp/protocol`](packages/protocol) | TS | TS/Rust/Go 호스트가 공유하는 와이어 프로토콜 ([명세](docs/protocol.md)) |
 | [`@webdesktopmcp/core`](packages/core) | TS | `document.modelContext` 폴리필 + 네이티브 미러 + 선언형 폼 API |
 | [`@webdesktopmcp/server`](packages/server) | TS | 프레임워크 독립 로컬 MCP 서버 + 앱 레지스트리 |
-| [`@webdesktopmcp/electron`](packages/electron) | TS | Electron 어댑터 (프리로드 자동 주입, 버전 게이트, 확인 다이얼로그 훅) |
+| [`@webdesktopmcp/electron`](packages/electron) | TS | Electron 어댑터 (프리로드 자동 주입, 기능 감지, 확인 다이얼로그 훅) |
 | [`@webdesktopmcp/cli`](packages/cli) | TS | `webdesktopmcp connect --app <이름>` stdio 셈 |
 | `crates/tauri-plugin-webdesktopmcp` | Rust | Tauri v2 플러그인 |
 | `go/webdesktopmcp` | Go | Wails v2 패키지 |
@@ -81,7 +68,7 @@ const win = new BrowserWindow({
 });
 ```
 
-렌더러에서는 위의 `document.modelContext.registerTool` 표준 코드만 쓰면 됩니다. 타입 추론이 필요하면 `@webdesktopmcp/core`의 `defineTool` 헬퍼를 쓰세요(반환값은 그냥 `ModelContextTool` — `execute` 안에서 입력 타입이 추론됩니다):
+렌더러에서는 위의 `document.modelContext.registerTool` 초안 API 코드만 쓰면 됩니다. 타입 추론이 필요하면 `@webdesktopmcp/core`의 `defineTool` 헬퍼를 쓰세요(반환값은 그냥 `ModelContextTool` — `execute` 안에서 입력 타입이 추론됩니다):
 
 ```ts
 import { defineTool } from "@webdesktopmcp/core";
@@ -97,6 +84,7 @@ const search = defineTool<{ keyword: string }>({
 디버깅 중에는 DevTools 콘솔에서 `window.__webDesktopMcp.listTools()`로 페이지가 등록한 도구를 볼 수 있습니다. **HTML 폼 선언형 API**도 지원합니다 — JS 한 줄 없이 폼이 곧 도구:
 
 ```html
+<!-- Polyfill mode: native declarative forms are not mirrored externally. -->
 <form toolname="order-coffee"
       tooldescription="커피를 주문한다. 음료 종류와 샷 수를 받아 주문 번호를 반환한다."
       toolautosubmit>
@@ -159,19 +147,26 @@ pnpm --filter webdesktopmcp-electron-demo start
 node packages/cli/dist/cli.js list
 ```
 
-데모 앱(`examples/electron-demo`)은 필수형 도구 4개 + 선언형 폼 도구(`order-coffee`)를 노출합니다. Claude Desktop에서 *"열린 할 일 보여줘"*, *"라떼 2샷 주문해줘"* 를 말해보세요.
+폴리필 모드 예시: 데모 앱(`examples/electron-demo`)은 필수형 도구 4개 + 선언형 폼 도구(`order-coffee`)를 노출합니다. Claude Desktop에서 *"열린 할 일 보여줘"*, *"라떼 2샷 주문해줘"* 를 말해보세요.
 
 ## 검증 상태
 
-- `@webdesktopmcp/core` — vitest **19/19** (폴리필 시맨틱, 선언형 폼, 네이티브 미러)
-- `@webdesktopmcp/server` — vitest **9/9** (레지스트리, HTTP MCP initialize/list/call, 인증, 노출 필터, 확인 훅)
-- Electron 데모 — **실제 앱 E2E 검증 완료**: 기동 → 프리로드 주입 → 도구 5개 등록 → HTTP `tools/call`로 필수형·선언형 도구 실행 → CLI stdio 셈 경유 호출까지 확인
-- Tauri (Rust) / Wails (Go) — `cargo check`/`go build` 및 각 테스트 스위트로 검증 (각 디렉터리 README 참고)
+설치·Tauri/Wails 설정·CLI 사용법은 [영문 안내](README.md)를 참고하세요. 기능과 검증 범위의 단일 기준은 [지원 표](docs/support.md), 보안 경계는 [보안 모델](docs/security.md)입니다. 로컬 자동 테스트는 공식 WPT 적합성이나 모든 플랫폼 네이티브 GUI 검증을 의미하지 않습니다.
 
-## WebMCP 표준과의 관계
+```bash
+pnpm build
+pnpm test
+pnpm typecheck
+```
 
-이 라이브러리는 [W3C WebMCP CG 드래프트](https://webmachinelearning.github.io/webmcp)([repo](https://github.com/webmachinelearning/webmcp), Chrome 149/Edge 150 오리진 트라이얼)의 페이지 측 API를 데스크톱 웹뷰로 가져옵니다. 원조 PoC는 [jasonjmcghee/WebMCP](https://github.com/jasonjmcghee/WebMCP), 생태계 도구는 [MCP-B](https://mcp-b.ai). 기술 리서치 전문: [webmcp-research.md](webmcp-research.md).
+## WebMCP 초안과의 관계
+
+페이지 함수를 로컬 MCP 서버와 CLI stdio 연결을 통해 외부 에이전트에 제공합니다. [2026-09-04 WebMCP CG 초안](https://webmachinelearning.github.io/webmcp/)은 W3C 표준도, W3C Standards Track 문서도 아닙니다. 이 라이브러리는 전체 적합성을 주장하지 않습니다.
+
+[Support and verification](docs/support.md) · [Research notes](webmcp-research.md)
 
 ## 라이선스
 
 MIT
+
+[References and implementation evidence](docs/references.md)

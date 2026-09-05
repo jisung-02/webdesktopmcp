@@ -12,7 +12,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
@@ -74,7 +74,10 @@ export async function startLocalMcpServer(options: LocalServerOptions): Promise<
                 },
               }
             : {}),
-          _meta: { "webdesktopmcp/frameId": tool.frameId, "webdesktopmcp/origin": tool.origin },
+          _meta: {
+            "webdesktopmcp/frameId": tool.frameId, "webdesktopmcp/origin": tool.origin,
+            ...(tool.annotations ? { "webdesktopmcp/annotations": tool.annotations } : {}),
+          },
         }),
       ),
     }));
@@ -224,7 +227,7 @@ function constantTimeEquals(a: string, b: string): boolean {
   const ab = Buffer.from(a, "utf8");
   const bb = Buffer.from(b, "utf8");
   if (ab.length !== bb.length) return false;
-  return ab.length === 0 || Buffer.compare(ab, bb) === 0;
+  return timingSafeEqual(ab, bb);
 }
 
 function errorResult(message: string) {

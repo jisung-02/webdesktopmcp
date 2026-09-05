@@ -15,7 +15,7 @@ export interface BootstrapOptions extends PolyfillInstallOptions {
   /**
    * `auto` (default): native `document.modelContext` → mirror registrations
    * to the host; otherwise install the polyfill.
-   * `force-polyfill`: always polyfill (spec-identical semantics today, e.g.
+   * `force-polyfill`: use the library subset (e.g.
    * for tests or when the native build is behind an unsettled draft).
    * `require-native`: only mirror; fail loudly when native support is absent.
    */
@@ -58,7 +58,7 @@ export function bootstrapWebDesktopMcp(options: BootstrapOptions): BootstrapHand
     return null;
   }
 
-  const polyfill = installModelContextPolyfill(options);
+  const polyfill = installModelContextPolyfill({ ...options, force: options.force || (hasNative && preference === "force-polyfill") });
   return polyfill ? wrapPolyfill(polyfill) : null;
 }
 
@@ -66,7 +66,7 @@ function wrapMirror(mirror: NativeMirrorHandle): BootstrapHandle {
   return {
     mode: "native-mirror",
     dispose: () => mirror.dispose(),
-    registeredToolNames: [],
+    get registeredToolNames() { return mirror.listTools().map(tool => tool.name); },
   };
 }
 

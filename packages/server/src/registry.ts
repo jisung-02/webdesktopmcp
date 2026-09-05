@@ -7,7 +7,7 @@
  * collisions across frames instead of shadowing them.
  */
 
-import type { RegisteredToolInfo, ToolDeclaration } from "@webdesktopmcp/protocol";
+import { validateToolDeclaration, type RegisteredToolInfo, type ToolDeclaration } from "@webdesktopmcp/protocol";
 
 export interface InvokeRequest {
   frameId: string;
@@ -38,6 +38,7 @@ export class ToolRegistry {
   readonly #pendingInvocations = new Map<
     string,
     {
+      frameId: string;
       resolve: (result: string) => void;
       reject: (err: Error) => void;
       timeout: NodeJS.Timeout;
@@ -46,7 +47,7 @@ export class ToolRegistry {
   readonly #changeCallbacks = new Set<() => void>();
   readonly #forwardPending = new Map<
     string,
-    { callerFrameId: string; requestId: string; timeout: NodeJS.Timeout }
+    { frameId: string; callerFrameId: string; requestId: string; timeout: NodeJS.Timeout }
   >();
   #nextInvocationId = 1;
   #nextForwardId = 1;
@@ -73,8 +74,13 @@ export class ToolRegistry {
    * Handle a `register` message from a frame. Replies `registerResult`
    * to the frame and notifies MCP clients.
    */
-  handleRegister(frameId: string, invocationId: string, tool: ToolDeclaration, exposedTo?: string[]): RegisterOutcome {
-    const outcome = this.#add(frameId, tool, exposedTo);
+  handleRegister(frameId: string, invocationId: string, tool: ToolDeclaration, exposedTo?: string[], origin = ""): RegisterOutcome {
+    let outcome: RegisterOutcome;
+    try {
+      outcome = this.#add(frameId, validateToolDeclaration(tool), exposedTo, origin);
+    } catch (error) {
+      outcome = { ok: false, errorMessage: error instanceof Error ? error.message : String(error) };
+    }
     this.adapter.sendToFrame(frameId, {
       kind: "registerResult",
       invocationId,
@@ -101,6 +107,18 @@ export class ToolRegistry {
         changed = true;
       }
     }
+    for (const [id, pending] of this.#pendingInvocations) {
+      if (pending.frameId !== frameId) continue;
+      this.#pendingInvocations.delete(id);
+      clearTimeout(pending.timeout);
+      pending.reject(new Error("The tool's document/frame disappeared."));
+      this.adapter.sendToFrame(frameId, { kind: "abort", invocationId: id });
+    }
+    for (const [id, pending] of this.#forwardPending) {
+      if (pending.frameId === frameId || pending.callerFrameId === frameId) {
+        this.#cancelForward(id, "AbortError", "A participating document/frame disappeared.");
+      }
+    }
     if (changed) this.#emitChange();
   }
 
@@ -114,20 +132,23 @@ export class ToolRegistry {
    * renderer's result. Rejects with a descriptive Error on failure.
    */
   async invoke(name: string, input: unknown, signal: AbortSignal): Promise<string> {
+    if (signal.aborted) throw new Error("Tool invocation was cancelled.");
     const tool = this.#tools.get(name);
+    if (tool?.exposedTo?.length) throw new Error("Tool is reserved for in-page agents (exposedTo).");
     if (!tool) throw new Error(`Unknown tool: "${name}". The app page may have unregistered it.`);
 
     const invocationId = `inv-${this.#nextInvocationId++}`;
     const promise = new Promise<string>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.#pendingInvocations.delete(invocationId);
+        this.adapter.sendToFrame(tool.frameId, { kind: "abort", invocationId });
         reject(
           new Error(
             `Tool "${name}" timed out after ${this.options.invocationTimeoutMs ?? 120_000}ms (no response from the app webview).`,
           ),
         );
       }, this.options.invocationTimeoutMs ?? 120_000);
-      this.#pendingInvocations.set(invocationId, { resolve, reject, timeout });
+      this.#pendingInvocations.set(invocationId, { frameId: tool.frameId, resolve, reject, timeout });
     });
 
     const onAbort = () => {
@@ -157,6 +178,7 @@ export class ToolRegistry {
 
   /** Handle an `executeResult` message from a frame. */
   handleExecuteResult(
+    frameId: string,
     invocationId: string,
     ok: boolean,
     result?: string,
@@ -164,7 +186,7 @@ export class ToolRegistry {
     errorMessage?: string,
   ): void {
     const pending = this.#pendingInvocations.get(invocationId);
-    if (pending) {
+    if (pending && pending.frameId === frameId) {
       this.#pendingInvocations.delete(invocationId);
       clearTimeout(pending.timeout);
       if (ok) pending.resolve(result ?? "null");
@@ -172,7 +194,7 @@ export class ToolRegistry {
       return;
     }
     const forwarded = this.#forwardPending.get(invocationId);
-    if (forwarded) {
+    if (forwarded && forwarded.frameId === frameId) {
       this.#forwardPending.delete(invocationId);
       clearTimeout(forwarded.timeout);
       this.adapter.sendToFrame(forwarded.callerFrameId, {
@@ -193,7 +215,7 @@ export class ToolRegistry {
   ): void {
     const tools = this.list().filter((t) => {
       if (t.frameId === frameId) return true;
-      if (fromOrigins && fromOrigins.length > 0 && !fromOrigins.includes(t.origin)) return false;
+      if (t.origin !== forOrigin && !fromOrigins?.includes(t.origin)) return false;
       return isExposedTo(t, forOrigin);
     });
     this.adapter.sendToFrame(frameId, { kind: "getToolsResponse", requestId, tools });
@@ -222,24 +244,40 @@ export class ToolRegistry {
     };
     const tool = this.#tools.get(name);
     if (!tool) return fail("NotFoundError", `Tool "${name}" is not registered.`);
-    if (tool.frameId === callerFrameId) {
-      // Same frame: the local polyfill would have executed directly; treat as
-      // unreachable but respond cleanly.
-      return fail("InvalidStateError", `Tool "${name}" belongs to the calling frame.`);
-    }
-    if (!isExposedTo(tool, fromOrigin)) {
+    if (tool.frameId !== callerFrameId && !isExposedTo(tool, fromOrigin)) {
       return fail("SecurityError", `Tool "${name}" is not exposed to origin "${fromOrigin}".`);
+    }
+    if ([...this.#forwardPending.values()].some(p => p.callerFrameId === callerFrameId && p.requestId === requestId)) {
+      return fail("InvalidStateError", "A call with this requestId is already pending.");
     }
     const invocationId = `fwd-${this.#nextForwardId++}`;
     const timeout = setTimeout(() => {
-      this.#forwardPending.delete(invocationId);
-      fail("TimeoutError", `Forwarded call to "${name}" timed out.`);
+      this.#cancelForward(invocationId, "TimeoutError", `Forwarded call to "${name}" timed out.`);
     }, this.options.invocationTimeoutMs ?? 120_000);
-    this.#forwardPending.set(invocationId, { callerFrameId, requestId, timeout });
+    this.#forwardPending.set(invocationId, { frameId: tool.frameId, callerFrameId, requestId, timeout });
     this.adapter.sendToFrame(tool.frameId, { kind: "execute", invocationId, name, input });
   }
 
-  #add(frameId: string, tool: ToolDeclaration, exposedTo?: string[]): RegisterOutcome {
+  handleCancelForward(callerFrameId: string, requestId: string): void {
+    for (const [id, pending] of this.#forwardPending) {
+      if (pending.callerFrameId === callerFrameId && pending.requestId === requestId) {
+        this.#cancelForward(id, "AbortError", "Tool invocation was cancelled.");
+      }
+    }
+  }
+
+  #cancelForward(invocationId: string, errorCode: string, errorMessage: string): void {
+    const pending = this.#forwardPending.get(invocationId);
+    if (!pending) return;
+    this.#forwardPending.delete(invocationId);
+    clearTimeout(pending.timeout);
+    this.adapter.sendToFrame(pending.frameId, { kind: "abort", invocationId });
+    this.adapter.sendToFrame(pending.callerFrameId, {
+      kind: "executeForwardResult", requestId: pending.requestId, ok: false, errorCode, errorMessage,
+    });
+  }
+
+  #add(frameId: string, tool: ToolDeclaration, exposedTo?: string[], origin = ""): RegisterOutcome {
     const existing = this.#tools.get(tool.name);
     if (existing && existing.frameId !== frameId) {
       return {
@@ -255,7 +293,7 @@ export class ToolRegistry {
       ...tool,
       ...(exposedTo && exposedTo.length > 0 ? { exposedTo } : {}),
       frameId,
-      origin: "",
+      origin,
     });
     return { ok: true };
   }
@@ -272,6 +310,6 @@ export class ToolRegistry {
 }
 
 export function isExposedTo(tool: RegisteredToolInfo, origin: string): boolean {
-  if (!tool.exposedTo || tool.exposedTo.length === 0) return true;
-  return tool.exposedTo.includes(origin);
+  if (!origin || origin === "null") return false;
+  return tool.origin === origin || !!tool.exposedTo?.includes(origin);
 }

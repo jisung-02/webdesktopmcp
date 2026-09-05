@@ -26,7 +26,7 @@ tauri::WebviewWindowBuilder::new(app, "main", Default::default())
     .build()?;
 ```
 
-페이지 코드는 표준 WebMCP API 그대로: `document.modelContext.registerTool({ name, description, inputSchema, execute })`.
+페이지 등록 API (실험적 CG 초안의 부분 구현): `document.modelContext.registerTool({ name, description, inputSchema, execute })`.
 
 ## API
 
@@ -40,9 +40,7 @@ tauri::WebviewWindowBuilder::new(app, "main", Default::default())
 
 ## 부트스트랩 JS 동작
 
-메인 월드에 `window.__webDesktopMcpHost {send, _deliver}`를 정의하고, 네이티브 `document.modelContext`가 있으면 **미러 모드**(native registerTool 래핑 → 호스트 중계), 없으면 **폴리필 모드**(registerTool/unregisterTool/getTools/executeTool, ontoolchange, AbortSignal 수명 시맨틱, 낙관적 등록 롤백)로 동작합니다. 선언형 `<form toolname>` API는 TS 코어에만 구현.
-
-자동 주입은 페이지 로드 경계에서 `eval` 기반이라 페이지의 첫 스크립트보다 늦을 수 있습니다. 파싱 전 보장이 필요하면 위처럼 `initialization_script`를 사용하세요.
+공통 TypeScript 코어에서 생성한 스크립트를 주입합니다. 필요한 네이티브 메서드를 감지하면 설치 이후 `registerTool` 호출을 미러링하고, 그렇지 않으면 폴리필을 사용합니다. 폴리필은 선언형 `<form toolname>` 부분집합을 포함합니다. 네이티브 선언형 폼은 외부 MCP에 미러링하지 않습니다. 전체 브라우저 초안 적합성은 주장하지 않습니다.
 
 ## 연결
 
@@ -53,8 +51,8 @@ webdesktopmcp connect --app "내 앱"   # stdio 셈 (Claude Desktop)
 # 또는 HTTP 직접 연결 (URL + Bearer 토큰)
 ```
 
-## 검증
+## 검증 범위 · 2026-09-05
 
-- `cargo check` / `cargo build` — 에러·경고 0
-- `cargo test` — 19 유닛 + 2 통합(실제 HTTP 스모크, 레지스트리 파일) 통과
-- 제한: MCP 클라이언트 연결 끊김 → abort 전파 없음(타임아웃 시 전파), Windows에서 데드-pid 프루닝 no-op, 전체 Tauri 앱 라이브 테스트는 미수행(컴파일 + 21개 자동 테스트로 담보). 리로드 시 재등록은 교체로 처리되지만, 새 페이지가 등록하지 않는 이전 도구는 창이 닫힐 때까지 남을 수 있음(TS 어댑터의 `did-navigate` 정리와 달리 내비게이션 전체 정리는 미구현).
+`cargo check`, `cargo build`, `cargo test`로 현재 checkout을 검증하세요. 로컬 빌드·자동 테스트는 실제 네이티브 GUI 검증이나 공식 WPT 적합성 검증을 의미하지 않습니다. 기능별 범위와 제한은 [지원 표](../../docs/support.md), 신뢰 경계는 [보안 모델](../../docs/security.md)를 참고하세요.
+
+호스트의 webview URL은 DOM 하위 iframe 신원을 인증하지 않습니다. 신뢰된 앱 콘텐츠에만 브리지를 설치하세요. 자동 주입보다 일찍 실행되는 도구 등록이 있다면 `initialization_script`를 사용하세요.
