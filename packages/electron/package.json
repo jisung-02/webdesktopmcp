@@ -28,5 +28,14 @@
     "electron": "^38.2.0",
     "esbuild": "^0.25.10",
     "typescript": "^5.9.2"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jisung-02/webdesktopmcp.git",
+    "directory": "packages/electron"
+  },
+  "bugs": {
+    "url": "https://github.com/jisung-02/webdesktopmcp/issues"
+  },
+  "homepage": "https://github.com/jisung-02/webdesktopmcp#readme"
 }

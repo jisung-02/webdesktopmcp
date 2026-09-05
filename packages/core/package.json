@@ -1,7 +1,7 @@
 {
   "name": "@webdesktopmcp/core",
   "version": "0.1.0",
-  "description": "W3C WebMCP polyfill for desktop webviews: implements document.modelContext on top of the webdesktopmcp host bridge",
+  "description": "Experimental WebMCP draft subset for desktop webviews, exposing document.modelContext through a host bridge",
   "license": "MIT",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -26,5 +26,14 @@
     "typescript": "^5.9.2",
     "vitest": "^3.2.4",
     "happy-dom": "^18.0.1"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jisung-02/webdesktopmcp.git",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/jisung-02/webdesktopmcp/issues"
+  },
+  "homepage": "https://github.com/jisung-02/webdesktopmcp#readme"
 }
